@@ -33,3 +33,8 @@ def test_create_rejects_unknown_ids(capsys: pytest.CaptureFixture[str]) -> None:
 def test_verify_rejects_unknown_ids(capsys: pytest.CaptureFixture[str]) -> None:
     assert main(["verify", str(EXAMPLE), "--only", "nope"]) == 1
     assert "no questions with ids ['nope']" in capsys.readouterr().err
+
+
+def test_update_rejects_unknown_ids(capsys: pytest.CaptureFixture[str]) -> None:
+    assert main(["update", str(EXAMPLE), "--only", "nope"]) == 1
+    assert "no questions with ids ['nope']" in capsys.readouterr().err

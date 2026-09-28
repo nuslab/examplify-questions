@@ -1,11 +1,14 @@
 """Create ExamSoft questions from a YAML spec.
 
-`validate` checks a spec offline. `folders` lists the question folders the account
+`import-md` converts a paper written in pandoc Markdown into a spec. `validate`
+checks a spec offline. `folders` lists the question folders the account
 can add to. `create` signs in through SSO, fills each question's editor in the
 portal and saves it as a draft (or approves it with --approve), then reads it back
 and reports where it differs from the spec. Each title ends with a tag hashed from
 the question's folder and spec id; `create` skips questions whose tag ExamSoft
 already has, and `verify` finds them by it and compares them with the spec.
+`update` refills and saves the questions that differ from the spec; an approved
+one gets a new revision and is approved again.
 """
 
 from __future__ import annotations
@@ -23,7 +26,6 @@ from .examsoft import (
     EDITORS,
     SESSION_FILE,
     AnyQuestion,
-    Found,
     Portal,
     PortalError,
     Saved,
@@ -34,9 +36,10 @@ from .examsoft import (
     sign_in,
 )
 from .folders import Folder, FolderError
+from .markdown import PaperError, convert, dump
 from .models import Essay, FillInTheBlank, MultipleChoice
 from .spec import SpecError, load
-from .tags import has_tag, tag, tagged_title
+from .tags import tag, tagged_title
 
 LOGIN_PROMPT = "Signing in through SSO. Complete any SSO prompts in the browser."
 
@@ -46,7 +49,7 @@ def main(argv: list[str] | None = None) -> int:
     args.timeout_ms = args.timeout * 1000 if "timeout" in args else 60_000
     try:
         return int(args.handler(args))
-    except (SpecError, FolderError, PortalError) as error:
+    except (SpecError, FolderError, PortalError, PaperError) as error:
         print(f"error: {error}", file=sys.stderr)
         return 1
 
@@ -54,6 +57,16 @@ def main(argv: list[str] | None = None) -> int:
 def parser() -> argparse.ArgumentParser:
     root = argparse.ArgumentParser(prog="examsoft-questions", description=__doc__.split("\n")[0])
     commands = root.add_subparsers(required=True)
+
+    convert = commands.add_parser(
+        "import-md", help="convert a paper in pandoc Markdown into a spec (offline)"
+    )
+    convert.add_argument("paper", type=Path, help="directory with questions/ and solutions/")
+    convert.add_argument(
+        "--config", type=Path, help="ExamSoft settings (default: PAPER/examsoft.yaml)"
+    )
+    convert.add_argument("-o", "--output", type=Path, help="write the spec here, not to stdout")
+    convert.set_defaults(handler=cmd_import_md)
 
     validate = commands.add_parser("validate", help="check a spec without signing in")
     validate.add_argument("spec", type=Path)
@@ -84,6 +97,25 @@ def parser() -> argparse.ArgumentParser:
     browser_options(create)
     create.set_defaults(handler=cmd_create)
 
+    update = commands.add_parser(
+        "update", help="bring the spec's questions in ExamSoft up to date with the spec"
+    )
+    update.add_argument("spec", type=Path)
+    update.add_argument("--only", nargs="+", metavar="ID", help="update only these question ids")
+    update.add_argument(
+        "--approve",
+        action="store_true",
+        help="approve updated drafts too (approved questions are always approved again)",
+    )
+    update.add_argument(
+        "--dry-run", action="store_true", help="refill each differing editor, but never save"
+    )
+    update.add_argument(
+        "--pause", action="store_true", help="wait for Enter before saving or leaving each editor"
+    )
+    browser_options(update)
+    update.set_defaults(handler=cmd_update)
+
     verify = commands.add_parser(
         "verify", help="find the spec's questions in ExamSoft and compare them with the spec"
     )
@@ -97,6 +129,16 @@ def parser() -> argparse.ArgumentParser:
 def browser_options(command: argparse.ArgumentParser) -> None:
     command.add_argument("--profile", default="../data/examsoft-profile")
     command.add_argument("--timeout", type=int, default=60, help="seconds per page action")
+
+
+def cmd_import_md(args: argparse.Namespace) -> int:
+    text = dump(convert(args.paper, args.config))
+    if args.output is None:
+        sys.stdout.write(text)
+        return 0
+    args.output.write_text(text, encoding="utf-8")
+    cmd_validate(argparse.Namespace(spec=args.output))
+    return 0
 
 
 def cmd_validate(args: argparse.Namespace) -> int:
@@ -127,7 +169,7 @@ def cmd_create(args: argparse.Namespace) -> int:
             folder = targets[question.id]
             question_tag = tag(folder, question.id)
             title = tagged_title(question, question_tag)
-            existing = tagged(portal, question_tag)
+            existing = portal.find_tagged(question_tag, folder)
             if existing:
                 items = ", ".join(str(found.item_id) for found in existing)
                 print(f"{question.id} [{question_tag}]: exists as item {items}; skipped")
@@ -161,7 +203,7 @@ def cmd_verify(args: argparse.Namespace) -> int:
             folder = target_folder(portal, question, args)
             question_tag = tag(folder, question.id)
             title = tagged_title(question, question_tag)
-            existing = tagged(portal, question_tag)
+            existing = portal.find_tagged(question_tag, folder)
             label = f"{question.id} [{question_tag}]"
             if not existing:
                 print(f"{label}: not in ExamSoft")
@@ -189,17 +231,66 @@ def cmd_verify(args: argparse.Namespace) -> int:
     return 1 if problems else 0
 
 
+def cmd_update(args: argparse.Namespace) -> int:
+    spec = load(args.spec)
+    questions = selected(spec.questions, args.only)
+    status: Status
+    problems = 0
+    with signed_in(args) as page:
+        portal = Portal(page, args.timeout_ms)
+        for question in questions:
+            folder = target_folder(portal, question, args)
+            question_tag = tag(folder, question.id)
+            title = tagged_title(question, question_tag)
+            existing = portal.find_tagged(question_tag, folder)
+            label = f"{question.id} [{question_tag}]"
+            if len(existing) != 1:
+                items = ", ".join(str(item.item_id) for item in existing)
+                reason = f"several items carry this tag: {items}" if items else "not in ExamSoft"
+                print(f"{label}: {reason}; skipped")
+                problems += 1
+                continue
+            item = existing[0]
+            if not portal.lock(item.item_id, item.revision):
+                print(f"{label}: item {item.item_id} is open in another session; skipped")
+                problems += 1
+                continue
+            saved = Saved(item.item_id, item.revision, item.url)
+            portal.open(item.url)
+            before = portal.read_back(question, folder, title, saved)
+            if not before:
+                print(f"{label}: item {item.item_id} is up to date")
+                continue
+            print(f"{label}: item {item.item_id} differs:")
+            report(before)
+            portal.fill(question, folder, title, item)
+            if args.dry_run:
+                found = portal.differences(question, folder, title, run(page, "state"))
+                report(found)
+                problems += bool(found)
+                pause(args, "Enter leaves this editor without saving")
+                continue
+            # Saving an approved question makes a new revision, which assessments can use
+            # only once approved; so it is approved again.
+            status = "Approved" if args.approve or item.approved else "Draft"
+            pause(args, f"Enter presses {'Approve' if status == 'Approved' else 'Save'}")
+            saved = portal.save(question, status, folder, item)
+            revision = "new revision" if saved.revision != item.revision else "same revision"
+            print(f"  updated item {saved.item_id} rev {saved.revision}, {revision} ({status})")
+            found = portal.read_back(question, folder, title, saved)
+            report(found)
+            problems += bool(found)
+    if problems:
+        print(f"{problems} problem(s); see above.")
+    return 1 if problems else 0
+
+
 def selected(questions: list[AnyQuestion], only: list[str] | None) -> list[AnyQuestion]:
     wanted = set(only or [])
     unknown = wanted - {q.id for q in questions}
     if unknown:
         raise SpecError(f"no questions with ids {sorted(unknown)}")
     return [q for q in questions if not wanted or q.id in wanted]
-
-
-def tagged(portal: Portal, question_tag: str) -> list[Found]:
-    """The questions carrying the tag; the search also matches it in stems and choices."""
-    return [found for found in portal.find(question_tag) if has_tag(found.title, question_tag)]
 
 
 def target_folder(

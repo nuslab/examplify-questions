@@ -9,7 +9,7 @@ from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Final, Literal
 
 from playwright.sync_api import BrowserContext, Page, Route
 from playwright.sync_api import Error as PlaywrightError
@@ -18,6 +18,7 @@ from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from .folders import Folder, FolderError, folders, missing_tail, resolve
 from .models import CaseStudyTab, Essay, FillInTheBlank, MultipleChoice, RangeBlank, TextBlank
 from .spec import content_html, stem_html
+from .tags import has_tag
 
 HOST = "https://examsoft.example.com"
 LOGIN = f"{HOST}/GKWeb/login/myschool"
@@ -44,6 +45,15 @@ CALCULATORS = {
 """(graphing, scientific) checkbox states per `calculator`."""
 FOLDER_RESOURCE = "0"
 """The portal's resource type of question folders (1 assessments, 2 categories, 4 rubrics)."""
+MATHML = re.compile(r"<math\b.*?</math>", re.S)
+SPACE_BEFORE_MATH = re.compile(r">\s+<math\b")
+FORMULA_STORE = "/STW-war/sfr/"
+"""Where the WIRIS server stores formula images; the portal accepts inline images only there."""
+READY: Final = "domcontentloaded"
+"""Editor pages are awaited by their own readiness (`loaded` in page.js): one with many
+formula images never fires `load`, although every image arrives."""
+LOAD_MS = 30_000
+LOAD_ATTEMPTS = 3
 REDIRECT_MS = 10_000
 """How long to wait for the editor's own redirect after a save."""
 SCRIPT = Path(__file__).with_name("page.js").read_text(encoding="utf-8")
@@ -172,10 +182,13 @@ class Portal:
 
     # Search and locks
 
-    def find(self, term: str) -> list[Found]:
-        """Questions whose ID, title, stem or choices contain `term`, as the portal searches."""
+    def find(self, term: str, folder: Folder | None = None) -> list[Found]:
+        """Questions whose ID, title, stem or choices contain `term`, as the portal searches.
+
+        With `folder`, the search covers only that folder.
+        """
         self._on_app_page()
-        result = run(self.page, "search", term=term)
+        result = run(self.page, "search", term=term, folders=[folder.key] if folder else [])
         if result.get("status") != "EI_OK":
             raise PortalError(f"searching for {term!r}: {messages(result)}")
         return [
@@ -189,6 +202,10 @@ class Portal:
             )
             for row in result["rows"]
         ]
+
+    def find_tagged(self, question_tag: str, folder: Folder) -> list[Found]:
+        """The questions in `folder` whose title carries the tag."""
+        return tagged_in(self.find(question_tag, folder), question_tag, folder)
 
     def lock(self, item_id: int, revision: int) -> bool:
         """Take the edit lock the portal takes before opening an editor; False if held."""
@@ -215,18 +232,47 @@ class Portal:
 
     def open_editor(self, kind: str) -> None:
         run_if_loaded(self.page, "install")
-        self.page.goto(f"{APP}/ei/question/{kind}/create/s={SCHOOL}", timeout=self.timeout_ms)
-        wait(self.page, "loaded", self.timeout_ms)
+        self.page.goto(
+            f"{APP}/ei/question/{kind}/create/s={SCHOOL}", timeout=self.timeout_ms, wait_until=READY
+        )
+        self.wait_loaded()
         run(self.page, "install")
 
-    def fill(self, question: AnyQuestion, folder: Folder, title: str) -> None:
-        """Open a new question of the question's type and fill it in, without saving."""
-        self.open_editor(EDITORS[question.type])
+    def wait_loaded(self, attempts: int = LOAD_ATTEMPTS) -> None:
+        """Wait for the editor; reload it when the portal's own scripts fail to build it.
+
+        An editor page intermittently throws while building its answer-choice editors,
+        which then never load; the same page loads fine on another try.
+        """
+        for attempt in range(1, attempts + 1):
+            try:
+                wait(self.page, "loaded", min(self.timeout_ms, LOAD_MS))
+                return
+            except PlaywrightTimeoutError:
+                if attempt == attempts:
+                    state = run_if_loaded(self.page, "loadState")
+                    raise PortalError(f"the editor did not finish loading: {state}") from None
+                run_if_loaded(self.page, "install")
+                self.page.reload(timeout=self.timeout_ms, wait_until=READY)
+
+    def fill(
+        self, question: AnyQuestion, folder: Folder, title: str, existing: Found | None = None
+    ) -> None:
+        """Fill in a new question of the question's type, or `existing`, without saving.
+
+        An existing question must be locked to this session (`lock`) first.
+        """
+        if existing is None:
+            self.open_editor(EDITORS[question.type])
+        else:
+            self.open(existing.url)
+            self.wait_loaded()
+            run(self.page, "install")
         self._rich = {}
         self.page.fill("#displayText", title)
-        self.select_folder(folder)
-        if question.case_study:
-            self.fill_case_study(question.case_study)
+        if folder.key != self.page.input_value("#folderUID"):
+            self.select_folder(folder)
+        self.fill_case_study(question.case_study or [])
         match question:
             case MultipleChoice():
                 self.fill_choices(question)
@@ -251,8 +297,24 @@ class Portal:
         self.settle_rich()
 
     def set_rich(self, editor_id: str, html: str) -> None:
+        html = self.render_math(html)
         self._rich[editor_id] = html
         run(self.page, "setRich", id=editor_id, html=html)
+
+    def render_math(self, html: str) -> str:
+        """Replace each MathML formula with a formula image, as the formula editor makes."""
+
+        def image(match: re.Match[str]) -> str:
+            made = run(self.page, "mathImage", mathml=match.group(0))
+            if FORMULA_STORE not in made["src"]:
+                raise PortalError(
+                    f"formula image for {match.group(0)[:80]}...: {made['src'][:200]}"
+                )
+            return str(made["html"])
+
+        # A space between a tag and a formula (`<strong>State:</strong> <img>`) is dropped
+        # when the portal saves the question; a non-breaking one is kept.
+        return MATHML.sub(image, SPACE_BEFORE_MATH.sub(">&nbsp;<math", html))
 
     def settle_rich(self, attempts: int = 5) -> None:
         """Make sure every rich-text editor still holds what was set in it.
@@ -284,12 +346,25 @@ class Portal:
 
     def fill_case_study(self, tabs: list[CaseStudyTab]) -> None:
         titles = "input[name='caseStudyTitle[]']"
-        self.page.click("#addCaseStudy")  # Opens the artefact with its first tab.
-        self.page.wait_for_selector(titles, state="attached", timeout=self.timeout_ms)
+        present = self.page.locator(titles).count()
+        if not tabs:
+            if present:  # The button reads "Remove Case Study" once there is one.
+                self.page.click("#addCaseStudy")
+                self.page.locator(".ui-dialog:visible button", has_text="Yes").click()
+                self.page.wait_for_selector(titles, state="detached", timeout=self.timeout_ms)
+            return
+        if not present:
+            self.page.click("#addCaseStudy")  # Opens the artefact with its first tab.
+            self.page.wait_for_selector(titles, state="attached", timeout=self.timeout_ms)
         while (count := self.page.locator(titles).count()) < len(tabs):
             self.page.click("#addCaseStudyTab")
             self.page.wait_for_function(
                 f'n => document.querySelectorAll("{titles}").length > n', arg=count
+            )
+        while (count := self.page.locator(titles).count()) > len(tabs):
+            self.page.locator(".ui-tabs-nav li span.removeCaseStudyClass").last.click()
+            self.page.wait_for_function(
+                f'n => document.querySelectorAll("{titles}").length < n', arg=count
             )
         numbers = [
             number.removeprefix("caseStudy-title")
@@ -334,8 +409,16 @@ class Portal:
 
     def fill_blanks(self, question: FillInTheBlank) -> None:
         # Each button registers the blank with the server's copy of the question and
-        # inserts its placeholder into the stem, which is then replaced whole.
-        for blank in question.blanks:
+        # inserts its placeholder into the stem, which is then replaced whole. An
+        # existing question keeps its blanks, which must still fit the spec.
+        wanted = ["RANGE" if isinstance(b, RangeBlank) else "BLANK" for b in question.blanks]
+        present = [row["type"] for row in run(self.page, "blanks")]
+        if present and present != wanted:
+            raise PortalError(
+                f"the question has blanks {present} and the spec {wanted}; changing the"
+                " blanks of an existing question is not supported"
+            )
+        for blank in question.blanks if not present else []:
             before = len(run(self.page, "blanks"))
             self.page.click("#addNewRange" if isinstance(blank, RangeBlank) else "#addNewBlank")
             self.page.wait_for_function(
@@ -348,18 +431,29 @@ class Portal:
         if sequences != [str(n) for n in range(1, len(question.blanks) + 1)]:
             raise PortalError(f"expected blanks numbered 1..{len(question.blanks)}: {sequences}")
         self.set_rich("questionRichText", stem_html(question))
-        for sequence, blank in zip(sequences, question.blanks, strict=True):
+        # Fields by row: a new question's ids (`blankText_1`) differ from an edit page's.
+        rows_with_type = self.page.locator("#blanksTable tr").filter(
+            has=self.page.locator("input[name='blankTypes[]']")
+        )
+        for index, blank in enumerate(question.blanks):
+            fields = rows_with_type.nth(index).locator("[name='blankTexts[]']")
             match blank:
                 case TextBlank():
-                    self.page.fill(f"#blankText_{sequence}", "|".join(blank.answers))
+                    fields.nth(0).fill("|".join(blank.answers))
                 case RangeBlank():
-                    self.page.fill(f"#rangeMin{sequence}", number(blank.range[0]))
-                    self.page.fill(f"#rangeMax{sequence}", number(blank.range[1]))
+                    fields.nth(0).fill(number(blank.range[0]))
+                    fields.nth(1).fill(number(blank.range[1]))
         self.page.locator("#proportionateScoring1").set_checked(question.partial_credit)
 
-    def save(self, question: AnyQuestion, status: Status, folder: Folder) -> Saved:
-        """Press Save (Draft) or Approve; the question exists once this returns."""
+    def save(
+        self, question: AnyQuestion, status: Status, folder: Folder, existing: Found | None = None
+    ) -> Saved:
+        """Press Save (Draft) or Approve; the question exists once this returns.
+
+        On an existing question's edit page the buttons save it in place.
+        """
         kind = EDITORS[question.type]
+        action, button = ("editSave", "Edit") if existing is not None else ("save", "")
         captured: dict[str, Any] = {}
 
         def capture(route: Route) -> None:
@@ -369,10 +463,10 @@ class Portal:
             route.fulfill(response=response)
 
         self.settle_rich()
-        pattern = f"**/ei/question/{kind}/save{status}"
+        pattern = f"**/ei/question/{kind}/{action}{status}"
         self.page.route(pattern, capture)
         try:
-            self.page.click(f"#{kind}{'SaveItem' if status == 'Draft' else 'ApproveItem'}")
+            self.page.click(f"#{kind}{button}{'SaveItem' if status == 'Draft' else 'ApproveItem'}")
             deadline = time.monotonic() + self.timeout_ms / 1000
             while "body" not in captured:
                 shown = run_if_loaded(self.page, "messages")
@@ -390,7 +484,13 @@ class Portal:
         if result.get("status") != "EI_OK":
             raise PortalError(messages(result))
         payload = result.get("payload") or {}
-        item_id, revision = int(payload["itemId"]), int(payload["revNum"])
+        if not isinstance(payload, dict):
+            payload = {}
+        fallback = existing or Found(0, 0, "", "", False, "")
+        item_id = int(payload.get("itemId") or fallback.item_id)
+        revision = int(payload.get("revNum") or fallback.revision)
+        if not item_id:
+            raise PortalError(f"save: no item id in {str(result)[:200]}")
         return Saved(item_id, revision, edit_url(kind, item_id, revision))
 
     def read_back(
@@ -399,30 +499,29 @@ class Portal:
         """Where the saved question, as its edit page shows it, differs from the spec."""
         # Save reloads into the edit page; Approve stays put, so open it then.
         try:
-            self.page.wait_for_url(f"{saved.url}*", timeout=REDIRECT_MS)
+            self.page.wait_for_url(f"{saved.url}*", timeout=REDIRECT_MS, wait_until=READY)
         except PlaywrightTimeoutError:
             self.open(saved.url)
-        wait(self.page, "loaded", self.timeout_ms)
+        self.wait_loaded()
         run(self.page, "install")
         return self.differences(question, folder, title, run(self.page, "state"))
 
     def open(self, url: str) -> None:
         run_if_loaded(self.page, "install")
-        self.page.goto(url, timeout=self.timeout_ms)
+        self.page.goto(url, timeout=self.timeout_ms, wait_until=READY)
 
     def differences(
         self, question: AnyQuestion, folder: Folder, title: str, state: dict[str, Any]
     ) -> list[str]:
         """Compare what the editor holds with the spec; stems and choices by their text."""
+
+        def text(html: str) -> str:
+            return str(run(self.page, "text", html=MATHML.sub("", html)))  # Formulas are images.
+
         texts = {
-            "stem": run(self.page, "text", html=stem_html(question)),
-            "caseStudy": [
-                run(self.page, "text", html=content_html(tab)) for tab in question.case_study or []
-            ],
-            "choices": [
-                run(self.page, "text", html=content_html(choice))
-                for choice in getattr(question, "choices", [])
-            ],
+            "stem": text(stem_html(question)),
+            "caseStudy": [text(content_html(tab)) for tab in question.case_study or []],
+            "choices": [text(content_html(choice)) for choice in getattr(question, "choices", [])],
         }
         return differences(question, folder, title, state, texts)
 
@@ -461,7 +560,9 @@ def differences(
         case MultipleChoice():
             scoring = question.effective_scoring
             check("partial credit", scoring == "partial", options["partial"])
-            check("select all that apply", scoring == "all_or_nothing", options["allThatApply"])
+            # The editor ticks and locks Select All That Apply along with +/- Partial Credit.
+            all_that_apply = scoring in ("all_or_nothing", "plus_minus")
+            check("select all that apply", all_that_apply, options["allThatApply"])
             check("+/- partial credit", scoring == "plus_minus", options["plusMinus"])
             check("randomize choices", question.randomize_choices, options["randomize"])
             expected_choices = [
@@ -482,6 +583,16 @@ def differences(
     return found
 
 
+def tagged_in(results: list[Found], question_tag: str, folder: Folder) -> list[Found]:
+    """Search results that are the tag's question: the exact `[tag]` in the title (the
+    search also matches stems and choices), in the folder itself (not a subfolder)."""
+    return [
+        found
+        for found in results
+        if has_tag(found.title, question_tag) and found.folder_key == folder.key
+    ]
+
+
 def edit_url(kind: str, item_id: int, revision: int) -> str:
     return f"{APP}/ei/question/{kind}/edit/s={SCHOOL},id={item_id},rev={revision}"
 
@@ -499,7 +610,7 @@ def normal_blank(row: dict[str, Any]) -> tuple[str, tuple[str | float, ...]]:
     return (row["type"], tuple(a for a in "|".join(row["values"]).split("|") if a))
 
 
-def run_if_loaded(page: Page, command: Literal["install", "messages"]) -> Any:  # noqa: ANN401
+def run_if_loaded(page: Page, command: Literal["install", "messages", "loadState"]) -> Any:  # noqa: ANN401
     """Run a command if the page is an editor; mid-navigation, there is nothing to run it in."""
     try:
         if page.evaluate("() => !!(window.EIUtil && window.jQuery)"):

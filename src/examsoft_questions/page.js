@@ -28,6 +28,19 @@
           ((window.caseStudyObject && caseStudyObject.length) || 0) &&
         document.querySelector("#createQuestionForm"));
 
+    case "loadState":
+      return {
+        url: location.href,
+        scripts: !!(window.jQuery && window.EIUtil && window.CKEDITOR),
+        editors: window.CKEDITOR ? Object.keys(CKEDITOR.instances).filter((id) => !ready(id)) : null,
+        choices: choiceRows().length,
+        tabs: document.querySelectorAll("input[name='caseStudyTitle[]']").length,
+        caseStudy: (window.caseStudyObject && caseStudyObject.length) || 0,
+        form: !!document.querySelector("#createQuestionForm"),
+        dialogs: [...document.querySelectorAll(".ui-dialog")].filter((d) => d.offsetParent)
+          .map((d) => d.innerText.trim().slice(0, 160)),
+      };
+
     case "install":
       // Leaving the editor must not raise the unsaved-changes prompt, and messages the
       // editor shows (client validation, EI_ERROR responses) are kept for the client.
@@ -64,6 +77,14 @@
         editor(args.id).setData(args.html, () => resolve(true));
       });
 
+    case "mathImage": {
+      // The formula editor's own conversion: the WIRIS server renders the MathML to a
+      // PNG in ExamSoft's file store. Its LaTeX service is missing on this portal.
+      const image = wrs_mathmlToImgObject(document, args.mathml);
+      image.style.verticalAlign = "middle";
+      return { src: image.getAttribute("src") || "", html: image.outerHTML };
+    }
+
     case "richTexts":
       return args.ids.map((id) => (editor(id) ? text(editor(id).getData()) : null));
 
@@ -97,7 +118,7 @@
     case "search":
       // The keyword search stores the query in the session; its grid then pages the results.
       return new Promise((resolve) => {
-        const query = { omniBasicSearchInput: args.term, selectedCategoryUIDs: [], selectedFolderUIDs: [] };
+        const query = { omniBasicSearchInput: args.term, selectedCategoryUIDs: [], selectedFolderUIDs: args.folders || [] };
         EIUtil._post("/STW-war/ei/questions/search", "json", null, JSON.stringify(query), null,
           (data) => {
             if (!data || data.status !== "EI_OK") return resolve(data || { status: "EMPTY" });

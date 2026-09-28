@@ -3,7 +3,15 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from examsoft_questions.examsoft import differences, messages, normal_blank, number
+from examsoft_questions.examsoft import (
+    SPACE_BEFORE_MATH,
+    Found,
+    differences,
+    messages,
+    normal_blank,
+    number,
+    tagged_in,
+)
 from examsoft_questions.folders import Folder
 from examsoft_questions.models import CaseStudyTab, FillInTheBlank, MultipleChoice
 from examsoft_questions.spec import load
@@ -119,3 +127,32 @@ def test_case_study_differences() -> None:
     retitled = [{"title": "Tab 1", "text": "n = 10"}, {"title": "Notes", "text": "x"}]
     found = differences(question, SANDBOX, MC_TITLE, base_state(caseStudy=retitled), texts)
     assert [line.split(":")[0] for line in found] == ["case study"]
+
+
+def test_plus_minus_ticks_select_all_that_apply() -> None:
+    question = load(EXAMPLE).questions[1]
+    assert isinstance(question, MultipleChoice)
+    question = question.model_copy(update={"scoring": "plus_minus"})
+    options = base_state()["options"] | {"partial": False, "allThatApply": True, "plusMinus": True}
+    state = base_state(options=options)
+    assert differences(question, SANDBOX, MC_TITLE, state, mc_texts()) == []
+
+
+def test_space_before_formula_is_kept() -> None:
+    html = "<li><strong>State:</strong> <math><mi>r</mi></math>, and x <math>y</math></li>"
+    assert SPACE_BEFORE_MATH.sub(">&nbsp;<math", html) == (
+        "<li><strong>State:</strong>&nbsp;<math><mi>r</mi></math>, and x <math>y</math></li>"
+    )
+
+
+def test_tagged_in_keeps_exact_tag_in_the_folder() -> None:
+    def found(item: int, title: str, folder_key: str) -> Found:
+        return Found(item, 1, title, folder_key, False, f"/edit/{item}")
+
+    results = [
+        found(1, "1A. [1 mark] Is there a map [abc234]", SANDBOX.key),
+        found(2, "Stem mentions abc234 without brackets", SANDBOX.key),
+        found(3, "1A. [1 mark] copy in another folder [abc234]", "other"),
+        found(4, "1A. [1 mark] copy in a subfolder [abc234]", "sub-of-k8"),
+    ]
+    assert [f.item_id for f in tagged_in(results, "abc234", SANDBOX)] == [1]

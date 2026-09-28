@@ -3,12 +3,16 @@
 Creates ExamSoft (Examplify) questions from a YAML spec by driving an
 ExamSoft portal with Playwright:
 
+- `import-md` converts a paper written in pandoc Markdown into a spec.
 - `validate` checks a spec offline.
 - `folders` lists the question folders your account can add to.
 - `create` fills each question's editor in the portal, saves it as a draft
   (or approves it with `--approve`), reads it back from its edit page and
   reports anything that differs from the spec. `--dry-run` fills and checks
   the editors without saving.
+- `update` finds the spec's questions in ExamSoft, and refills and saves those
+  that differ from the spec. A draft is saved in place; an approved question
+  gets a new revision and is approved again, so assessments can use it.
 - `verify` finds the spec's questions in ExamSoft and compares them with the
   spec again.
 
@@ -16,14 +20,15 @@ Every title ends with a tag such as `[2btdfu]`, a short hash of the question's
 folder path and its spec `id`. `create` searches ExamSoft for each tag first
 and skips questions that already exist, so a run that stopped part-way can
 simply be repeated, from any machine. The tag does not depend on the question's
-content: editing a question in the spec keeps its tag, and does not update the
-portal copy (`verify` shows the differences). Moving a question to another
+content: editing a question in the spec keeps its tag, and `update` brings the
+portal copy in line. Moving a question to another
 folder, in the spec or in the portal, or removing the tag from its title, makes
 the next `create` add it again.
 
 Multiple choice (one or several correct answers), fill in the blank (text and
 numeric-range blanks) and essay questions are supported, each optionally with a
-case study artefact.
+case study artefact. Formulas written as MathML become formula images, as the
+editor's formula button makes them.
 
 ## Install
 
@@ -32,13 +37,18 @@ pip install -e '.[dev]'
 python -m playwright install chromium
 ```
 
+`import-md` needs pandoc on `PATH`, or `pip install -e '.[markdown]'` for a
+bundled copy.
+
 ## Use
 
 ```
+examsoft-questions import-md paper/ -o exam.yaml
 examsoft-questions validate exam.yaml
 examsoft-questions folders --match CS101
 examsoft-questions create exam.yaml --dry-run
 examsoft-questions create exam.yaml
+examsoft-questions update exam.yaml
 examsoft-questions verify exam.yaml
 ```
 
@@ -46,8 +56,8 @@ The browser opens with a persistent profile (`--profile`, by default
 `../data/examsoft-profile`) and signs in through SSO when the session has
 lapsed; complete any SSO prompts in the browser. ExamSoft's session cookies are
 kept in the profile's `examsoft-session.json`, since Chromium drops session
-cookies at start and ExamSoft asks SSO for a password sign-in every time. `--pause` waits for Enter
-before each save so you can look at the filled editor. `--only ID ...` limits a
+cookies at start and ExamSoft asks SSO for a password sign-in every time.
+`--pause` waits for Enter before each save so you can look at the filled editor. `--only ID ...` limits a
 run to some questions.
 
 ## Spec
@@ -128,6 +138,70 @@ upper). `partial_credit` gives credit per correct blank.
 
 Essay (`essay`): `char_limit` caps the answer's length in Examplify.
 
+## Papers in Markdown
+
+`import-md PAPER` reads a paper laid out as `PAPER/questions/*.md`, one file per
+part, with the answers in `PAPER/solutions/` under the same file names:
+
+```markdown
+# Part 2: Graphs
+
+## Context
+
+**The Maze**
+
+A maze has \(n \geq 2\) cells...
+
+## Questions
+
+**2A. [1 mark]** Is the maze connected?
+
+a. Yes  
+b. No
+
+**2B. [2 marks]** Which cells are dead ends? Select all that apply.
+
+a. Cell 1  
+...
+
+**2C. [2 marks]** The shortest path visits (1) ______ cells and costs (2) ______.
+```
+
+```markdown
+**2A. a**
+
+**2B. a, c**
+
+**2C. (1) 4, (2) −3**
+```
+
+- Each part is a question group, and its Context is a case study tab on every
+  subquestion, titled by the Context's bold first line. A link in the Context
+  to another part's file adds that part's Context as an earlier tab.
+- A subquestion with `a.`, `b.`, ... options is multiple choice. It is scored
+  with +/- Partial Credit when it says "select all that apply" or has several
+  correct options; "None of the above" is an ordinary option.
+- A subquestion without options is fill in the blank: each `______` in the stem
+  is a blank, answered in order by `(1) ..., (2) ...`, or a single blank is
+  added after the stem. Answers are accepted as written, with an ASCII minus,
+  and in lower, capitalised and upper case.
+- Points come from `[n marks]`, and the title is the label and the start of the
+  stem. TeX formulas become MathML, and local links keep only their text.
+
+`PAPER/examsoft.yaml` (or `--config`) adds what the Markdown does not say:
+
+```yaml
+folder: 2026 Fall/CS101/Quiz       # required
+defaults: {calculator: none}                # any question field, for every question
+parts:                                      # per part file, without .md
+  q2-graphs: {calculator: scientific}
+questions:                                  # per label; replaces generated fields
+  2C: {blanks: [{answers: ["4", four]}, {range: [-3.01, -2.99]}]}
+```
+
+A config entry for a part or label the paper does not have is an error, so a
+renumbered paper cannot leave an override on the wrong question.
+
 ## How it works
 
 The portal's editors are driven through the page's own controls and scripts
@@ -140,8 +214,16 @@ portal's keyword search, keeping only results whose title holds the exact
 
 Opening an editor locks the question to the session, and ExamSoft releases
 locks only at logout, so every run releases its locks when it finishes.
-`verify` takes the lock the way the portal does before opening an editor, and
-skips a question that is open in another session instead of taking it over.
+`update` and `verify` take the lock the way the portal does before opening an
+editor, and skip a question that is open in another session instead of taking
+it over. Opening an approved question's editor does not change it; ExamSoft
+makes the new revision when it is saved. `update` cannot change the number or
+kinds of a fill-in-the-blank question's blanks.
+
+The editor's LaTeX conversion is not available on the portal, so formulas
+go in as MathML: the formula editor's server renders each one to an image in
+ExamSoft's file store. An editor page occasionally fails to build its answer
+choice editors; it is then reloaded.
 
 ## Development
 
@@ -149,5 +231,6 @@ skips a question that is open in another session instead of taking it over.
 ruff format --check . && ruff check . && mypy && pytest
 ```
 
-Tests cover the spec, folder resolution, tags and the comparison of a
-read-back question with its spec; they need no ExamSoft account.
+Tests cover the spec, the Markdown converter, folder resolution, tags and the
+comparison of a read-back question with its spec; they need pandoc but no
+ExamSoft account.

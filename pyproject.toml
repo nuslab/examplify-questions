@@ -18,7 +18,8 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["ruff>=0.6", "mypy>=1.10", "pytest>=8", "types-PyYAML"]
+markdown = ["pypandoc_binary>=1.13"]
+dev = ["ruff>=0.6", "mypy>=1.10", "pytest>=8", "types-PyYAML", "pypandoc_binary>=1.13"]
 
 [project.scripts]
 examsoft-questions = "examsoft_questions.cli:main"
@@ -49,3 +50,7 @@ warn_unreachable = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[[tool.mypy.overrides]]
+module = ["pypandoc"]
+ignore_missing_imports = true

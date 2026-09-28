@@ -1,0 +1,7 @@
+folder: CS101/Sandbox
+defaults:
+  calculator: none
+parts:
+  q10-games: {calculator: scientific}
+questions:
+  10A: {points: 1.5}
