@@ -19,7 +19,7 @@ dependencies = [
 
 [project.optional-dependencies]
 markdown = ["pypandoc_binary>=1.13"]
-dev = ["ruff>=0.6", "mypy>=1.10", "pytest>=8", "types-PyYAML", "pypandoc_binary>=1.13"]
+dev = ["examsoft-questions[markdown]", "ruff>=0.6", "mypy>=1.10", "pytest>=8", "types-PyYAML"]
 
 [project.scripts]
 examsoft-questions = "examsoft_questions.cli:main"

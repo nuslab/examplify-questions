@@ -25,11 +25,7 @@ class SpecError(ValueError):
 
 
 def load(path: Path) -> Spec:
-    """Read a spec, filling each question's missing fields from `defaults`.
-
-    A default applies only to the question types that have that field, so one
-    `defaults` block can hold MC options next to essay options.
-    """
+    """Read a spec, filling missing fields from `defaults` for the types that have them."""
     try:
         raw = yaml.safe_load(path.read_text(encoding="utf-8"))
     except yaml.YAMLError as error:

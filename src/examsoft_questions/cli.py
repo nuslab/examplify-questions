@@ -1,15 +1,4 @@
-"""Create ExamSoft questions from a YAML spec.
-
-`import-md` converts a paper written in pandoc Markdown into a spec. `validate`
-checks a spec offline. `folders` lists the question folders the account
-can add to. `create` signs in through SSO, fills each question's editor in the
-portal and saves it as a draft (or approves it with --approve), then reads it back
-and reports where it differs from the spec. Each title ends with a tag hashed from
-the question's folder and spec id; `create` skips questions whose tag ExamSoft
-already has, and `verify` finds them by it and compares them with the spec.
-`update` refills and saves the questions that differ from the spec; an approved
-one gets a new revision and is approved again.
-"""
+"""Create ExamSoft questions from a YAML spec."""
 
 from __future__ import annotations
 
@@ -17,6 +6,7 @@ import argparse
 import sys
 from collections.abc import Iterator
 from contextlib import contextmanager, suppress
+from dataclasses import dataclass
 from pathlib import Path
 
 from playwright.sync_api import BrowserContext, Dialog, Page, sync_playwright
@@ -26,12 +16,11 @@ from .examsoft import (
     EDITORS,
     SESSION_FILE,
     AnyQuestion,
+    Found,
     Portal,
     PortalError,
-    Saved,
     Status,
     restore_session,
-    run,
     save_session,
     sign_in,
 )
@@ -158,131 +147,129 @@ def cmd_folders(args: argparse.Namespace) -> int:
 
 
 def cmd_create(args: argparse.Namespace) -> int:
-    spec = load(args.spec)
+    questions = selected(load(args.spec).questions, args.only)
     status: Status = "Approved" if args.approve else "Draft"
-    todo = selected(spec.questions, args.only)
     problems = 0
     with signed_in(args) as page:
         portal = Portal(page, args.timeout_ms)
-        targets = {q.id: target_folder(portal, q, args) for q in todo}
-        for question in todo:
-            folder = targets[question.id]
-            question_tag = tag(folder, question.id)
-            title = tagged_title(question, question_tag)
-            existing = portal.find_tagged(question_tag, folder)
+        for target in targets(portal, questions, args.create_folders and not args.dry_run):
+            question, folder, title = target.question, target.folder, target.title
+            existing = portal.find_tagged(target.tag, folder)
             if existing:
-                items = ", ".join(str(found.item_id) for found in existing)
-                print(f"{question.id} [{question_tag}]: exists as item {items}; skipped")
+                print(f"{target.label}: exists as item {item_ids(existing)}; skipped")
                 continue
-            print(f"{question.id} [{question_tag}]: {describe(question)} -> {folder.name}")
+            print(f"{target.label}: {describe(question)} -> {folder.name}")
             portal.fill(question, folder, title)
             if args.dry_run:
-                found = portal.differences(question, folder, title, run(page, "state"))
-                report(found)
-                problems += bool(found)
+                problems += report(portal.differences(question, folder, title))
                 pause(args, "Enter leaves this editor without saving")
                 continue
             pause(args, f"Enter presses {'Approve' if args.approve else 'Save'}")
-            saved = portal.save(question, status, folder)
+            saved = portal.save(question, status)
             print(f"  created item {saved.item_id} rev {saved.revision} ({status}): {saved.url}")
-            found = portal.read_back(question, folder, title, saved)
-            report(found)
-            problems += bool(found)
-    if problems:
-        print(f"{problems} question(s) differ from the spec; check them in the portal.")
-    return 1 if problems else 0
+            problems += report(portal.read_back(question, folder, title, saved.url))
+    return outcome(problems)
 
 
 def cmd_verify(args: argparse.Namespace) -> int:
-    spec = load(args.spec)
-    questions = selected(spec.questions, args.only)
+    questions = selected(load(args.spec).questions, args.only)
     problems = 0
     with signed_in(args) as page:
         portal = Portal(page, args.timeout_ms)
-        for question in questions:
-            folder = target_folder(portal, question, args)
-            question_tag = tag(folder, question.id)
-            title = tagged_title(question, question_tag)
-            existing = portal.find_tagged(question_tag, folder)
-            label = f"{question.id} [{question_tag}]"
+        for target in targets(portal, questions):
+            existing = portal.find_tagged(target.tag, target.folder)
             if not existing:
-                print(f"{label}: not in ExamSoft")
+                print(f"{target.label}: not in ExamSoft")
                 problems += 1
                 continue
             if len(existing) > 1:
-                items = ", ".join(str(found.item_id) for found in existing)
-                print(f"{label}: several items carry this tag: {items}")
+                print(f"{target.label}: several items carry this tag: {item_ids(existing)}")
                 problems += 1
             for found in existing:
                 if not portal.lock(found.item_id, found.revision):
-                    print(f"{label}: item {found.item_id} is open in another session; skipped")
+                    print(
+                        f"{target.label}: item {found.item_id} is open in another session; skipped"
+                    )
                     problems += 1
                     continue
                 portal.open(found.url)
-                saved = Saved(found.item_id, found.revision, found.url)
-                differences = portal.read_back(question, folder, title, saved)
+                differences = portal.read_back(
+                    target.question, target.folder, target.title, found.url
+                )
                 state = "Approved" if found.approved else "Draft"
                 verdict = "" if differences else ", matches the spec"
-                print(f"{label}: item {found.item_id} rev {found.revision} ({state}){verdict}")
-                report(differences)
-                problems += bool(differences)
-    if problems:
-        print(f"{problems} problem(s); see above.")
-    return 1 if problems else 0
+                print(
+                    f"{target.label}: item {found.item_id} rev {found.revision} ({state}){verdict}"
+                )
+                problems += report(differences)
+    return outcome(problems)
 
 
 def cmd_update(args: argparse.Namespace) -> int:
-    spec = load(args.spec)
-    questions = selected(spec.questions, args.only)
-    status: Status
+    questions = selected(load(args.spec).questions, args.only)
     problems = 0
     with signed_in(args) as page:
         portal = Portal(page, args.timeout_ms)
-        for question in questions:
-            folder = target_folder(portal, question, args)
-            question_tag = tag(folder, question.id)
-            title = tagged_title(question, question_tag)
-            existing = portal.find_tagged(question_tag, folder)
-            label = f"{question.id} [{question_tag}]"
+        for target in targets(portal, questions):
+            question, folder, title = target.question, target.folder, target.title
+            existing = portal.find_tagged(target.tag, folder)
             if len(existing) != 1:
-                items = ", ".join(str(item.item_id) for item in existing)
-                reason = f"several items carry this tag: {items}" if items else "not in ExamSoft"
-                print(f"{label}: {reason}; skipped")
+                several = f"several items carry this tag: {item_ids(existing)}"
+                print(f"{target.label}: {several if existing else 'not in ExamSoft'}; skipped")
                 problems += 1
                 continue
             item = existing[0]
             if not portal.lock(item.item_id, item.revision):
-                print(f"{label}: item {item.item_id} is open in another session; skipped")
+                print(f"{target.label}: item {item.item_id} is open in another session; skipped")
                 problems += 1
                 continue
-            saved = Saved(item.item_id, item.revision, item.url)
             portal.open(item.url)
-            before = portal.read_back(question, folder, title, saved)
+            before = portal.read_back(question, folder, title, item.url)
             if not before:
-                print(f"{label}: item {item.item_id} is up to date")
+                print(f"{target.label}: item {item.item_id} is up to date")
                 continue
-            print(f"{label}: item {item.item_id} differs:")
+            print(f"{target.label}: item {item.item_id} differs:")
             report(before)
             portal.fill(question, folder, title, item)
             if args.dry_run:
-                found = portal.differences(question, folder, title, run(page, "state"))
-                report(found)
-                problems += bool(found)
+                problems += report(portal.differences(question, folder, title))
                 pause(args, "Enter leaves this editor without saving")
                 continue
-            # Saving an approved question makes a new revision, which assessments can use
-            # only once approved; so it is approved again.
-            status = "Approved" if args.approve or item.approved else "Draft"
+            status: Status = "Approved" if args.approve or item.approved else "Draft"
             pause(args, f"Enter presses {'Approve' if status == 'Approved' else 'Save'}")
-            saved = portal.save(question, status, folder, item)
+            saved = portal.save(question, status, item)
             revision = "new revision" if saved.revision != item.revision else "same revision"
             print(f"  updated item {saved.item_id} rev {saved.revision}, {revision} ({status})")
-            found = portal.read_back(question, folder, title, saved)
-            report(found)
-            problems += bool(found)
-    if problems:
-        print(f"{problems} problem(s); see above.")
-    return 1 if problems else 0
+            problems += report(portal.read_back(question, folder, title, saved.url))
+    return outcome(problems)
+
+
+@dataclass(frozen=True)
+class Target:
+    question: AnyQuestion
+    folder: Folder
+    tag: str
+    title: str
+
+    @property
+    def label(self) -> str:
+        return f"{self.question.id} [{self.tag}]"
+
+
+def targets(portal: Portal, questions: list[AnyQuestion], create: bool = False) -> list[Target]:
+    """Resolve every folder before any question is touched, so a bad path changes nothing."""
+    resolved = []
+    for question in questions:
+        try:
+            folder = portal.folder(question.folder_path, create=create)
+        except FolderError as error:
+            hint = "" if create or "several" in str(error) else " (--create-folders creates it)"
+            raise FolderError(f"{question.id}: {error}{hint}") from None
+        question_tag = tag(folder, question.id)
+        resolved.append(
+            Target(question, folder, question_tag, tagged_title(question, question_tag))
+        )
+    return resolved
 
 
 def selected(questions: list[AnyQuestion], only: list[str] | None) -> list[AnyQuestion]:
@@ -293,18 +280,7 @@ def selected(questions: list[AnyQuestion], only: list[str] | None) -> list[AnyQu
     return [q for q in questions if not wanted or q.id in wanted]
 
 
-def target_folder(
-    portal: Portal, question: MultipleChoice | FillInTheBlank | Essay, args: argparse.Namespace
-) -> Folder:
-    create = getattr(args, "create_folders", False) and not getattr(args, "dry_run", False)
-    try:
-        return portal.folder(question.folder_path, create=create)
-    except FolderError as error:
-        hint = "" if create or "several" in str(error) else " (--create-folders creates it)"
-        raise FolderError(f"{question.id}: {error}{hint}") from None
-
-
-def describe(question: MultipleChoice | FillInTheBlank | Essay) -> str:
+def describe(question: AnyQuestion) -> str:
     match question:
         case MultipleChoice():
             correct = sum(choice.correct for choice in question.choices)
@@ -322,7 +298,8 @@ def describe(question: MultipleChoice | FillInTheBlank | Essay) -> str:
         "graphing": ["graphing calculator"],
         "both": ["graphing and scientific calculators"],
     }[question.calculator]
-    tools += ["spreadsheet"] if question.spreadsheet else []
+    if question.spreadsheet:
+        tools.append("spreadsheet")
     if question.group:
         tools.append(f"group {question.group!r}")
     if question.case_study:
@@ -332,9 +309,20 @@ def describe(question: MultipleChoice | FillInTheBlank | Essay) -> str:
     return f"{EDITORS[question.type]} {question.points:g} pt, {detail}{extra}"
 
 
-def report(found: list[str]) -> None:
+def report(found: list[str]) -> bool:
     for difference in found:
         print(f"  differs: {difference}")
+    return bool(found)
+
+
+def item_ids(found: list[Found]) -> str:
+    return ", ".join(str(item.item_id) for item in found)
+
+
+def outcome(problems: int) -> int:
+    if problems:
+        print(f"{problems} problem(s); see above.")
+    return 1 if problems else 0
 
 
 def pause(args: argparse.Namespace, prompt: str) -> None:
@@ -349,16 +337,16 @@ def signed_in(args: argparse.Namespace) -> Iterator[Page]:
             Path(args.profile), headless=False, no_viewport=True
         )
         session = Path(args.profile) / SESSION_FILE
+        page = context.pages[0] if context.pages else context.new_page()
         try:
             restore_session(context, session)
-            page = context.pages[0] if context.pages else context.new_page()
             page.on("dialog", accept)
             sign_in(page, args.timeout_ms, lambda: print(LOGIN_PROMPT))
             save_session(context, session)
             yield page
         finally:
             with suppress(PlaywrightError):
-                Portal(page).clear_locks()  # Editors opened here would stay locked otherwise.
+                Portal(page).clear_locks()
                 save_session(context, session)
             context.close()
 
@@ -366,7 +354,7 @@ def signed_in(args: argparse.Namespace) -> Iterator[Page]:
 def accept(dialog: Dialog) -> None:
     """Leaving an editor may raise its unsaved-changes prompt; every other dialog is shown."""
     if dialog.type == "beforeunload":
-        with suppress(PlaywrightError):  # Already handled by the page.
+        with suppress(PlaywrightError):
             dialog.accept()
     else:
         print(f"  portal dialog: {dialog.message}")

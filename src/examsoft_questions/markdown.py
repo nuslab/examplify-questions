@@ -1,34 +1,8 @@
 """Convert a paper written in pandoc Markdown into a question spec.
 
-A paper directory holds `questions/*.md`, one file per part, and `solutions/*.md` with
-the same names. A part file is laid out as
-
-    # Part 2: Graphs
-    ## Context
-    ...shared material...
-    ## Questions
-    **2A. [1 mark]** Stem...
-
-    a. Option
-    b. Option
-
-and its solution file states each answer on its own line: `**2A. a**`, `**2B. a, c**`,
-`**2D. 3**` or `**2C. (1) 4, (2) -3**`. Each part becomes a question group whose
-Context is a case study on every subquestion; a link in the Context to another part's
-file adds that part's Context as an earlier tab. Options make a multiple-choice
-question, scored with +/- partial credit when it says "select all that apply" or has
-several correct options. Without options it is a fill in the blank: each `______` in
-the stem is a blank, or one blank is added after the stem. Formulas are written as
-MathML, which the portal turns into formula images when the question is filled in.
-
-`examsoft.yaml` in the paper directory supplies what the Markdown does not:
-
-    folder: 2026 Fall/CS101/Quiz       # required
-    defaults: {calculator: none}                # any question field, for every question
-    parts:                                      # per part file (name without .md)
-      q2-graphs: {calculator: scientific}
-    questions:                                  # per label; replaces generated fields
-      2C: {blanks: [{answers: ["4", four]}, {range: [-3.01, -2.99]}]}
+A paper directory holds `questions/*.md`, one file per part, the answers in
+`solutions/*.md` under the same names, and `examsoft.yaml` for what the Markdown
+does not say (see the README).
 """
 
 from __future__ import annotations
@@ -52,9 +26,12 @@ ANSWER = re.compile(r"^(\d+[A-Za-z])\.\s+(.+)$", re.S)
 NUMBERED_ANSWER = re.compile(r"\((\d+)\)\s*(.+?)\s*(?=,\s*\(\d+\)|$)", re.S)
 BLANK_RUN = re.compile(r"_{3,}")
 SELECT_ALL = re.compile(r"select\s+all\s+that\s+apply", re.I)
+EXTERNAL = re.compile(r"^[a-zA-Z][\w+.-]*:|^#")
+"""A URL or an anchor, as opposed to a link to another file of the paper."""
 PART_PREFIX = re.compile(r"^Part\s+\w+\s*:\s*", re.I)
 MINUS = "\u2212"
 TAB_TITLE_LIMIT = 30
+TAB_LIMIT = 5
 TITLE_LIMIT = 60
 CONFIG_KEYS = {"folder", "defaults", "parts", "questions"}
 GENERATED = {"id", "type", "title", "stem_html", "choices", "blanks", "points", "scoring", "group"}
@@ -75,7 +52,7 @@ def pandoc_path() -> str:
     if found:
         return found
     try:
-        import pypandoc  # noqa: PLC0415 - optional, like the paper's Makefile
+        import pypandoc  # noqa: PLC0415 - optional
 
         return str(pypandoc.get_pandoc_path())
     except (ImportError, OSError) as error:
@@ -150,8 +127,8 @@ def block_text(block: Block) -> str:
     return ""
 
 
-def local_links(blocks: list[Block]) -> Iterator[tuple[str, str]]:
-    """(target, text) of every link in the blocks that is not a URL or an anchor."""
+def local_links(blocks: list[Block]) -> Iterator[str]:
+    """The target of every link in the blocks that is not a URL or an anchor."""
     stack: list[Any] = list(blocks)
     while stack:
         node = stack.pop()
@@ -160,21 +137,23 @@ def local_links(blocks: list[Block]) -> Iterator[tuple[str, str]]:
         elif isinstance(node, dict):
             if node.get("t") == "Link":
                 target = node["c"][2][0]
-                if not re.match(r"^[a-zA-Z][\w+.-]*:|^#", target):
-                    yield target, plain(node["c"][1])
+                if not EXTERNAL.match(target):
+                    yield target
             stack.extend(node.values())
 
 
 def unlink(node: Any) -> Any:  # noqa: ANN401 - pandoc's JSON AST
-    """Local links cannot resolve in ExamSoft: keep only their text, as docx.lua does."""
+    """Local links cannot resolve in ExamSoft: keep only their text."""
     if isinstance(node, list):
         out: list[Any] = []
         for item in node:
-            if isinstance(item, dict) and item.get("t") == "Link":
-                target = item["c"][2][0]
-                if not re.match(r"^[a-zA-Z][\w+.-]*:|^#", target):
-                    out.extend(unlink(item["c"][1]))
-                    continue
+            if (
+                isinstance(item, dict)
+                and item.get("t") == "Link"
+                and not EXTERNAL.match(item["c"][2][0])
+            ):
+                out.extend(unlink(item["c"][1]))
+                continue
             out.append(unlink(item))
         return out
     if isinstance(node, dict):
@@ -323,9 +302,7 @@ def mark_blanks(blocks: list[Block]) -> tuple[list[Block], int]:
 
 
 def title_of(sub: Subquestion) -> str:
-    rest = plain(sub.blocks[0]["c"][1:])
-    head = plain(sub.blocks[0]["c"][:1])
-    title = f"{head} {rest}".strip()
+    title = plain(sub.blocks[0]["c"])
     if len(title) > TITLE_LIMIT:
         title = title[:TITLE_LIMIT].rsplit(" ", 1)[0] + "..."
     return title
@@ -355,14 +332,10 @@ def split_options(sub: Subquestion) -> tuple[list[Block], list[list[Block]]]:
 
 
 def question(sub: Subquestion, answer: str | None, html: Html) -> dict[str, Any]:
-    stem, options = split_options(sub)
-    base: dict[str, Any] = {
-        "id": sub.label,
-        "title": title_of(sub),
-        "points": sub.points,
-    }
     if answer is None:
         raise PaperError(f"{sub.label}: no `**{sub.label}. answer**` line in the solution")
+    stem, options = split_options(sub)
+    base: dict[str, Any] = {"id": sub.label, "title": title_of(sub), "points": sub.points}
     if options:
         correct = correct_letters(answer, len(options), sub.label)
         base |= {
@@ -411,7 +384,7 @@ def context_title(part: Part) -> str:
 
 
 def natural_key(path: Path) -> list[Any]:
-    """Order files as `sort -V` does in the paper's Makefile: q2 before q10."""
+    """Order file names with their numbers as numbers: q2 before q10."""
     return [int(part) if part.isdigit() else part for part in re.split(r"(\d+)", path.name)]
 
 
@@ -460,7 +433,7 @@ def convert(paper: Path, config_path: Path | None = None) -> dict[str, Any]:
         html = Html(api)
         answers = read_answers(paper / "solutions" / filename)
         tabs = []
-        for target, _text in local_links(part.context):
+        for target in local_links(part.context):
             linked = parts.get(Path(target.split("#")[0]).name)
             if linked and linked[0] is not part and linked[0].context:
                 tabs.append(
@@ -468,7 +441,9 @@ def convert(paper: Path, config_path: Path | None = None) -> dict[str, Any]:
                 )
         if part.context:
             tabs.append({"title": context_title(part), "html": html(unlink(part.context))})
-        case_study = tabs[:5] or None
+        if len(tabs) > TAB_LIMIT:
+            raise PaperError(f"{filename}: more than {TAB_LIMIT} case study tabs")
+        case_study = tabs or None
         for sub in part.subquestions:
             generated = question(sub, answers.get(sub.label), html)
             generated["group"] = part.title

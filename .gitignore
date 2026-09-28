@@ -10,9 +10,7 @@ dist/
 .ruff_cache/
 .pytest_cache/
 
-# Browser profiles hold the ExamSoft session; question specs may hold exam content
-browser-profile/
+# Browser profiles hold the ExamSoft session; specs may hold exam content
 examsoft-profile/
 data/
-screenshots/
 

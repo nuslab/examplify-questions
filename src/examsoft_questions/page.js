@@ -11,8 +11,16 @@
     return div.textContent.replace(/\s+/g, " ").trim();
   };
   const choiceRows = () => [...document.querySelectorAll("#mcqChoices tr.mcqRow")];
-  const blankRows = () =>
-    [...document.querySelectorAll("#blanksTable input[name='blankTypes[]']")].map((input) => input.closest("tr"));
+  const blanks = () =>
+    [...document.querySelectorAll("#blanksTable input[name='blankTypes[]']")].map((input) => {
+      const row = input.closest("tr");
+      return {
+        type: input.value,
+        sequence: row.querySelector("td.letter").textContent.trim(),
+        values: [...row.querySelectorAll("[name='blankTexts[]']")].map((e) => e.value),
+      };
+    });
+  const httpError = (xhr, status, error) => ({ status: "HTTP_ERROR", messages: [String(status) + " " + String(error)] });
   const findFolder = () => {
     const tree = window.eitree && eitree.get("selectFolder");
     return tree ? tree.getNodeByKey(args.key) : null;
@@ -99,11 +107,7 @@
       return choiceRows().map((row) => row.getAttribute("choiceuid"));
 
     case "blanks":
-      return blankRows().map((row) => ({
-        type: row.querySelector("input[name='blankTypes[]']").value,
-        sequence: row.querySelector("td.letter").textContent.trim(),
-        values: [...row.querySelectorAll("[name='blankTexts[]']")].map((e) => e.value),
-      }));
+      return blanks();
 
     case "text":
       return text(args.html);
@@ -112,7 +116,7 @@
       return new Promise((resolve) =>
         EIUtil._post(args.url, "json", null, args.payload == null ? null : JSON.stringify(args.payload), null,
           (data) => resolve(data),
-          (xhr, status, error) => resolve({ status: "HTTP_ERROR", messages: [String(status) + " " + String(error)] }),
+          (...failure) => resolve(httpError(...failure)),
           null));
 
     case "search":
@@ -128,7 +132,7 @@
               .then((grid) => resolve({ status: "EI_OK", rows: grid.mData || [] }))
               .catch((error) => resolve({ status: "FETCH_ERROR", messages: [String(error)] }));
           },
-          (xhr, status, error) => resolve({ status: "HTTP_ERROR", messages: [String(status) + " " + String(error)] }),
+          (...failure) => resolve(httpError(...failure)),
           null);
       });
 
@@ -170,10 +174,7 @@
           const content = document.getElementById(input.id.replace("caseStudy-title", "caseStudy-fragment-"));
           return { title: input.value, text: content && editor(content.id) ? text(editor(content.id).getData()) : null };
         }),
-        blanks: blankRows().map((row) => ({
-          type: row.querySelector("input[name='blankTypes[]']").value,
-          values: [...row.querySelectorAll("[name='blankTexts[]']")].map((e) => e.value),
-        })),
+        blanks: blanks(),
       };
     }
 

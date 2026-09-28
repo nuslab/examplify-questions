@@ -93,15 +93,14 @@ def wait(page: Page, command: str, timeout_ms: float, **args: object) -> None:
     page.wait_for_function(SCRIPT, arg={"command": command, **args}, timeout=timeout_ms)
 
 
-def sign_in(page: Page, timeout_ms: float, prompt: Callable[[], None] = lambda: None) -> bool:
+def sign_in(page: Page, timeout_ms: float, prompt: Callable[[], None]) -> None:
     """Open the question bank, signing in through SSO when the session has lapsed.
 
-    Returns whether it signed in; `prompt` is called first. SSO prompts wait in the
-    browser without a timeout.
+    `prompt` is called before signing in; SSO prompts wait in the browser without a timeout.
     """
     page.goto(QUESTIONS, timeout=timeout_ms)
     if page.url.startswith(f"{APP}/ei/"):
-        return False
+        return
     prompt()
     if not page.url.startswith(LOGIN):
         page.goto(LOGIN, timeout=timeout_ms)
@@ -109,15 +108,10 @@ def sign_in(page: Page, timeout_ms: float, prompt: Callable[[], None] = lambda: 
     page.wait_for_url(f"{APP}/ei/**", timeout=0)
     if not page.url.startswith(QUESTIONS):
         page.goto(QUESTIONS, timeout=timeout_ms)
-    return True
 
 
 def save_session(context: BrowserContext, path: Path) -> None:
-    """Keep ExamSoft's cookies, which are session cookies Chromium drops at its next start.
-
-    ExamSoft asks SSO for a password sign-in each time, so without them every
-    launch would prompt again; with them, a launch reuses the session until it expires.
-    """
+    """Keep ExamSoft's session cookies, which Chromium drops at its next start."""
     cookies = [c for c in context.cookies() if c["domain"].endswith(COOKIE_DOMAIN)]
     temporary = path.with_suffix(".tmp")
     temporary.write_text(json.dumps(cookies), encoding="utf-8")
@@ -292,7 +286,7 @@ class Portal:
         graphing, scientific = CALCULATORS[question.calculator]
         self.page.locator("#graphingCalculatorChk").set_checked(graphing)
         self.page.locator("#scientificCalculatorChk").set_checked(scientific)
-        self.page.locator("#spreadsheetChk").set_checked(question.spreadsheet)
+        self.set_spreadsheet(question.spreadsheet)
         self.page.fill("#comment", question.rationale or "")
         self.settle_rich()
 
@@ -333,6 +327,17 @@ class Portal:
                 run(self.page, "setRich", id=editor_id, html=self._rich[editor_id])
             self.page.wait_for_timeout(300)
         raise PortalError(f"editors {drifted} did not keep their text")
+
+    def set_spreadsheet(self, enabled: bool) -> None:
+        box = self.page.locator("#spreadsheetChk")
+        if box.is_checked() == enabled:
+            return
+        box.click()
+        if not enabled:  # Unticking asks to confirm removing the spreadsheet.
+            self.page.click("#removeESSOk")
+        self.page.wait_for_function(
+            "on => document.querySelector('#spreadsheetChk').checked === on", arg=enabled
+        )
 
     def select_folder(self, folder: Folder) -> None:
         self.page.click("#selectQuestionFolderOpen")
@@ -445,9 +450,7 @@ class Portal:
                     fields.nth(1).fill(number(blank.range[1]))
         self.page.locator("#proportionateScoring1").set_checked(question.partial_credit)
 
-    def save(
-        self, question: AnyQuestion, status: Status, folder: Folder, existing: Found | None = None
-    ) -> Saved:
+    def save(self, question: AnyQuestion, status: Status, existing: Found | None = None) -> Saved:
         """Press Save (Draft) or Approve; the question exists once this returns.
 
         On an existing question's edit page the buttons save it in place.
@@ -483,37 +486,31 @@ class Portal:
             raise PortalError(f"save: HTTP {captured['status']}, not JSON") from error
         if result.get("status") != "EI_OK":
             raise PortalError(messages(result))
-        payload = result.get("payload") or {}
-        if not isinstance(payload, dict):
-            payload = {}
-        fallback = existing or Found(0, 0, "", "", False, "")
-        item_id = int(payload.get("itemId") or fallback.item_id)
-        revision = int(payload.get("revNum") or fallback.revision)
+        payload = result.get("payload")
+        ids = payload if isinstance(payload, dict) else {}
+        item_id = int(ids.get("itemId") or (existing.item_id if existing else 0))
+        revision = int(ids.get("revNum") or (existing.revision if existing else 0))
         if not item_id:
             raise PortalError(f"save: no item id in {str(result)[:200]}")
         return Saved(item_id, revision, edit_url(kind, item_id, revision))
 
-    def read_back(
-        self, question: AnyQuestion, folder: Folder, title: str, saved: Saved
-    ) -> list[str]:
+    def read_back(self, question: AnyQuestion, folder: Folder, title: str, url: str) -> list[str]:
         """Where the saved question, as its edit page shows it, differs from the spec."""
         # Save reloads into the edit page; Approve stays put, so open it then.
         try:
-            self.page.wait_for_url(f"{saved.url}*", timeout=REDIRECT_MS, wait_until=READY)
+            self.page.wait_for_url(f"{url}*", timeout=REDIRECT_MS, wait_until=READY)
         except PlaywrightTimeoutError:
-            self.open(saved.url)
+            self.open(url)
         self.wait_loaded()
         run(self.page, "install")
-        return self.differences(question, folder, title, run(self.page, "state"))
+        return self.differences(question, folder, title)
 
     def open(self, url: str) -> None:
         run_if_loaded(self.page, "install")
         self.page.goto(url, timeout=self.timeout_ms, wait_until=READY)
 
-    def differences(
-        self, question: AnyQuestion, folder: Folder, title: str, state: dict[str, Any]
-    ) -> list[str]:
-        """Compare what the editor holds with the spec; stems and choices by their text."""
+    def differences(self, question: AnyQuestion, folder: Folder, title: str) -> list[str]:
+        """Compare what the open editor holds with the spec; stems and choices by their text."""
 
         def text(html: str) -> str:
             return str(run(self.page, "text", html=MATHML.sub("", html)))  # Formulas are images.
@@ -523,7 +520,7 @@ class Portal:
             "caseStudy": [text(content_html(tab)) for tab in question.case_study or []],
             "choices": [text(content_html(choice)) for choice in getattr(question, "choices", [])],
         }
-        return differences(question, folder, title, state, texts)
+        return differences(question, folder, title, run(self.page, "state"), texts)
 
 
 def differences(
@@ -612,11 +609,9 @@ def normal_blank(row: dict[str, Any]) -> tuple[str, tuple[str | float, ...]]:
 
 def run_if_loaded(page: Page, command: Literal["install", "messages", "loadState"]) -> Any:  # noqa: ANN401
     """Run a command if the page is an editor; mid-navigation, there is nothing to run it in."""
-    try:
+    with suppress(PlaywrightError):
         if page.evaluate("() => !!(window.EIUtil && window.jQuery)"):
             return run(page, command)
-    except PlaywrightError:
-        pass
     return None
 
 

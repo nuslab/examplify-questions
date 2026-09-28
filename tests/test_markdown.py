@@ -127,3 +127,17 @@ def test_errors(tmp_path: Path, change: Any, message: str) -> None:  # noqa: ANN
     change(paper)
     with pytest.raises(PaperError, match=message.replace("*", r"\*").replace("(", r"\(")):
         convert(paper)
+
+
+def test_too_many_case_study_tabs(tmp_path: Path) -> None:
+    (tmp_path / "questions").mkdir()
+    (tmp_path / "solutions").mkdir()
+    (tmp_path / "examsoft.yaml").write_text("folder: F")
+    links = " ".join(f"[p{n}](p{n}.md)" for n in range(2, 7))
+    for n in range(1, 7):
+        context = f"**Part {n}** {links if n == 1 else ''}"
+        body = f"# Part {n}\n\n## Context\n\n{context}\n\n## Questions\n\n**{n}A. [1 mark]** x\n"
+        (tmp_path / "questions" / f"p{n}.md").write_text(body)
+        (tmp_path / "solutions" / f"p{n}.md").write_text(f"**{n}A. 1**\n")
+    with pytest.raises(PaperError, match="more than 5 case study tabs"):
+        convert(tmp_path)

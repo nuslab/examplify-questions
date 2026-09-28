@@ -106,8 +106,7 @@ class MultipleChoice(QuestionBase):
 
     @model_validator(mode="after")
     def correct_choices(self) -> Self:
-        correct = sum(choice.correct for choice in self.choices)
-        if not correct:
+        if not any(choice.correct for choice in self.choices):
             raise ValueError("mark at least one choice correct")
         return self
 

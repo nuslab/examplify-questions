@@ -25,16 +25,7 @@ def test_validate_reports_errors(tmp_path: Path, capsys: pytest.CaptureFixture[s
     assert "error:" in capsys.readouterr().err
 
 
-def test_create_rejects_unknown_ids(capsys: pytest.CaptureFixture[str]) -> None:
-    assert main(["create", str(EXAMPLE), "--only", "nope"]) == 1
-    assert "no questions with ids ['nope']" in capsys.readouterr().err
-
-
-def test_verify_rejects_unknown_ids(capsys: pytest.CaptureFixture[str]) -> None:
-    assert main(["verify", str(EXAMPLE), "--only", "nope"]) == 1
-    assert "no questions with ids ['nope']" in capsys.readouterr().err
-
-
-def test_update_rejects_unknown_ids(capsys: pytest.CaptureFixture[str]) -> None:
-    assert main(["update", str(EXAMPLE), "--only", "nope"]) == 1
+@pytest.mark.parametrize("command", ["create", "update", "verify"])
+def test_rejects_unknown_ids(command: str, capsys: pytest.CaptureFixture[str]) -> None:
+    assert main([command, str(EXAMPLE), "--only", "nope"]) == 1
     assert "no questions with ids ['nope']" in capsys.readouterr().err
