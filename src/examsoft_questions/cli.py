@@ -26,7 +26,6 @@ CALCULATOR_LABELS: dict[str, list[str]] = {
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    args.timeout_ms = args.timeout * 1000 if "timeout" in args else 60_000
     try:
         return int(args.handler(args))
     except (SpecError, FolderError, PortalError, PaperError) as error:
@@ -35,6 +34,30 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
+    browser = argparse.ArgumentParser(add_help=False)
+    browser.add_argument("--profile", default="../data/examsoft-profile")
+    browser.add_argument(
+        "--timeout",
+        dest="timeout_ms",
+        type=lambda seconds: int(seconds) * 1000,
+        default=60_000,
+        metavar="SECONDS",
+        help="seconds per page action (default: 60)",
+    )
+    spec = argparse.ArgumentParser(add_help=False)
+    spec.add_argument("spec", type=Path)
+    spec.add_argument("--only", nargs="+", metavar="ID", help="only these question ids")
+    editing = argparse.ArgumentParser(add_help=False)
+    editing.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="fill the editors and compare them with the spec, but never save",
+    )
+    editing.add_argument(
+        "--pause", action="store_true", help="wait for Enter before saving or leaving each editor"
+    )
+    editing.add_argument("--approve", action="store_true", help="approve instead of saving a draft")
+
     root = argparse.ArgumentParser(prog="examsoft-questions", description=__doc__.split("\n")[0])
     commands = root.add_subparsers(required=True)
 
@@ -52,63 +75,34 @@ def build_parser() -> argparse.ArgumentParser:
     validate.add_argument("spec", type=Path)
     validate.set_defaults(handler=cmd_validate)
 
-    listing = commands.add_parser("folders", help="list the question folders you can add to")
+    listing = commands.add_parser(
+        "folders", parents=[browser], help="list the question folders you can add to"
+    )
     listing.add_argument("--match", default="", help="only folders whose path contains this")
-    browser_options(listing)
     listing.set_defaults(handler=cmd_folders)
 
-    create = commands.add_parser("create", help="create the spec's questions in ExamSoft")
-    create.add_argument("spec", type=Path)
-    create.add_argument("--only", nargs="+", metavar="ID", help="create only these question ids")
-    create.add_argument(
-        "--approve", action="store_true", help="press Approve instead of Save (draft)"
-    )
-    create.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="fill each editor and check it against the spec, but never save",
-    )
-    create.add_argument(
-        "--pause", action="store_true", help="wait for Enter before saving or leaving each editor"
+    create = commands.add_parser(
+        "create", parents=[spec, editing, browser], help="create the spec's questions in ExamSoft"
     )
     create.add_argument(
         "--create-folders", action="store_true", help="create missing folders at the path's end"
     )
-    browser_options(create)
     create.set_defaults(handler=cmd_create)
 
-    update = commands.add_parser(
-        "update", help="bring the spec's questions in ExamSoft up to date with the spec"
-    )
-    update.add_argument("spec", type=Path)
-    update.add_argument("--only", nargs="+", metavar="ID", help="update only these question ids")
-    update.add_argument(
-        "--approve",
-        action="store_true",
-        help="approve updated drafts too (approved questions are always approved again)",
-    )
-    update.add_argument(
-        "--dry-run", action="store_true", help="refill each differing editor, but never save"
-    )
-    update.add_argument(
-        "--pause", action="store_true", help="wait for Enter before saving or leaving each editor"
-    )
-    browser_options(update)
-    update.set_defaults(handler=cmd_update)
+    update_help = "bring the spec's questions in ExamSoft up to date with the spec"
+    commands.add_parser(
+        "update",
+        parents=[spec, editing, browser],
+        help=update_help,
+        description=f"{update_help}; approved questions are always approved again",
+    ).set_defaults(handler=cmd_update)
 
-    verify = commands.add_parser(
-        "verify", help="find the spec's questions in ExamSoft and compare them with the spec"
-    )
-    verify.add_argument("spec", type=Path)
-    verify.add_argument("--only", nargs="+", metavar="ID", help="verify only these question ids")
-    browser_options(verify)
-    verify.set_defaults(handler=cmd_verify)
+    commands.add_parser(
+        "verify",
+        parents=[spec, browser],
+        help="find the spec's questions in ExamSoft and compare them with the spec",
+    ).set_defaults(handler=cmd_verify)
     return root
-
-
-def browser_options(command: argparse.ArgumentParser) -> None:
-    command.add_argument("--profile", default="../data/examsoft-profile")
-    command.add_argument("--timeout", type=int, default=60, help="seconds per page action")
 
 
 def cmd_import_md(args: argparse.Namespace) -> int:

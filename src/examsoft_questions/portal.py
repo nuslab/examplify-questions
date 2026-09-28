@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any, Final, Literal
 
 from playwright.sync_api import Error as PlaywrightError
-from playwright.sync_api import Page, Route
+from playwright.sync_api import Page, Route, expect
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
 from .compare import differences
@@ -140,16 +140,14 @@ class Portal:
 
     # Search and locks
 
-    def find(self, term: str, folder: Folder | None = None) -> list[Item]:
-        """Questions whose ID, title, stem or choices contain `term`, as the portal searches.
-
-        With `folder`, the search covers only that folder.
-        """
+    def find_tagged(self, tag: str, folder: Folder) -> list[Item]:
+        """The questions in `folder` whose title carries the tag."""
+        # The keyword search also matches IDs, stems and choices.
         self._on_app_page()
-        result = run(self.page, "search", term=term, folders=[folder.key] if folder else [])
+        result = run(self.page, "search", term=tag, folders=[folder.key])
         if result.get("status") != "EI_OK":
-            raise PortalError(f"searching for {term!r}: {messages(result)}")
-        return [
+            raise PortalError(f"searching for {tag!r}: {messages(result)}")
+        found = [
             Item(
                 item_id=int(row["itemID"]),
                 revision=int(row["revNum"]),
@@ -160,10 +158,7 @@ class Portal:
             )
             for row in result["rows"]
         ]
-
-    def find_tagged(self, tag: str, folder: Folder) -> list[Item]:
-        """The questions in `folder` whose title carries the tag."""
-        return tagged_in(self.find(tag, folder), tag, folder)
+        return tagged_in(found, tag, folder)
 
     def lock(self, item_id: int, revision: int) -> bool:
         """Take the edit lock the portal takes before opening an editor; False if held."""
@@ -188,16 +183,9 @@ class Portal:
 
     # Editor
 
-    def open_editor(self, kind: str) -> None:
-        run_if_loaded(self.page, "install")
-        self.page.goto(
-            f"{APP}/ei/question/{kind}/create/s={SCHOOL}", timeout=self.timeout_ms, wait_until=READY
-        )
-        self.wait_loaded()
-        run(self.page, "install")
-
     def wait_loaded(self, attempts: int = LOAD_ATTEMPTS) -> None:
-        """Wait for the editor; reload it when the portal's own scripts fail to build it.
+        """Wait for the editor and install page.js in it; reload the editor when the portal's
+        own scripts fail to build it.
 
         An editor page intermittently throws while building its answer-choice editors,
         which then never load; the same page loads fine on another try.
@@ -205,6 +193,7 @@ class Portal:
         for attempt in range(1, attempts + 1):
             try:
                 wait(self.page, "loaded", min(self.timeout_ms, LOAD_MS))
+                run(self.page, "install")
                 return
             except PlaywrightTimeoutError:
                 if attempt == attempts:
@@ -220,12 +209,9 @@ class Portal:
 
         An existing question must be locked to this session (`lock`) first.
         """
-        if existing is None:
-            self.open_editor(EDITOR_KINDS[question.type])
-        else:
-            self.open(existing.url)
-            self.wait_loaded()
-            run(self.page, "install")
+        kind = EDITOR_KINDS[question.type]
+        self.open(existing.url if existing else f"{APP}/ei/question/{kind}/create/s={SCHOOL}")
+        self.wait_loaded()
         self._rich = {}
         self.page.fill("#displayText", title)
         if folder.key != self.page.input_value("#folderUID"):
@@ -299,45 +285,35 @@ class Portal:
         box.click()
         if not enabled:  # Unticking asks to confirm removing the spreadsheet.
             self.page.click("#removeESSOk")
-        self.page.wait_for_function(
-            "on => document.querySelector('#spreadsheetChk').checked === on", arg=enabled
-        )
+        expect(box).to_be_checked(checked=enabled, timeout=self.timeout_ms)
 
     def select_folder(self, folder: Folder) -> None:
         self.page.click("#selectQuestionFolderOpen")
         wait(self.page, "folderLoaded", self.timeout_ms, key=folder.key)
         run(self.page, "selectFolder", key=folder.key)
-        self.page.wait_for_function(
-            "key => document.querySelector('#folderUID').value === key",
-            arg=folder.key,
-            timeout=self.timeout_ms,
-        )
+        expect(self.page.locator("#folderUID")).to_have_value(folder.key, timeout=self.timeout_ms)
 
     def fill_case_study(self, tabs: list[CaseStudyTab]) -> None:
-        titles = "input[name='caseStudyTitle[]']"
-        present = self.page.locator(titles).count()
+        titles = self.page.locator("input[name='caseStudyTitle[]']")
+        present = titles.count()
         if not tabs:
             if present:  # The button reads "Remove Case Study" once there is one.
                 self.page.click("#addCaseStudy")
                 self.page.locator(".ui-dialog:visible button", has_text="Yes").click()
-                self.page.wait_for_selector(titles, state="detached", timeout=self.timeout_ms)
+                expect(titles).to_have_count(0, timeout=self.timeout_ms)
             return
         if not present:
             self.page.click("#addCaseStudy")  # Opens the artefact with its first tab.
-            self.page.wait_for_selector(titles, state="attached", timeout=self.timeout_ms)
-        while (count := self.page.locator(titles).count()) < len(tabs):
+            expect(titles).to_have_count(1, timeout=self.timeout_ms)
+        while (count := titles.count()) < len(tabs):
             self.page.click("#addCaseStudyTab")
-            self.page.wait_for_function(
-                f'n => document.querySelectorAll("{titles}").length > n', arg=count
-            )
-        while (count := self.page.locator(titles).count()) > len(tabs):
+            expect(titles).to_have_count(count + 1, timeout=self.timeout_ms)
+        while (count := titles.count()) > len(tabs):
             self.page.locator(".ui-tabs-nav li span.removeCaseStudyClass").last.click()
-            self.page.wait_for_function(
-                f'n => document.querySelectorAll("{titles}").length < n', arg=count
-            )
+            expect(titles).to_have_count(count - 1, timeout=self.timeout_ms)
         numbers = [
             number.removeprefix("caseStudy-title")
-            for number in self.page.locator(titles).evaluate_all("inputs => inputs.map(i => i.id)")
+            for number in titles.evaluate_all("inputs => inputs.map(i => i.id)")
         ]
         editors = [f"caseStudy-fragment-{n}" for n in numbers]
         wait(self.page, "editorsReady", self.timeout_ms, ids=editors)
@@ -349,22 +325,18 @@ class Portal:
             self.set_rich(editor_id, content_html(tab))
 
     def fill_choices(self, question: MultipleChoice) -> None:
-        rows = "#mcqChoices tr.mcqRow"
-        while (count := self.page.locator(rows).count()) < len(question.choices):
+        rows = self.page.locator("#mcqChoices tr.mcqRow")
+        while (count := rows.count()) < len(question.choices):
             self.page.click("#addMCQChoice")
-            self.page.wait_for_function(
-                f"n => document.querySelectorAll('{rows}').length > n", arg=count
-            )
-        while (count := self.page.locator(rows).count()) > len(question.choices):
-            self.page.locator(rows).last.locator("a.removeChoice img").click()
-            self.page.wait_for_function(
-                f"n => document.querySelectorAll('{rows}').length < n", arg=count
-            )
+            expect(rows).to_have_count(count + 1, timeout=self.timeout_ms)
+        while (count := rows.count()) > len(question.choices):
+            rows.last.locator("a.removeChoice img").click()
+            expect(rows).to_have_count(count - 1, timeout=self.timeout_ms)
         ids: list[str] = run(self.page, "choiceIds")
         wait(self.page, "editorsReady", self.timeout_ms, ids=ids)
         for choice_id, choice in zip(ids, question.choices, strict=True):
             self.set_rich(choice_id, content_html(choice))
-            row = self.page.locator(f'{rows}[choiceuid="{choice_id}"]')
+            row = self.page.locator(f'#mcqChoices tr.mcqRow[choiceuid="{choice_id}"]')
             row.locator("input[name='correctBool[]']").set_checked(choice.correct)
             row.locator("input[name='locked[]']").set_checked(choice.locked)
         # The three scoring boxes are mutually exclusive; clear before setting the one.
@@ -387,14 +359,11 @@ class Portal:
                 f"the question has blanks {present} and the spec {wanted}; changing the"
                 " blanks of an existing question is not supported"
             )
+        types = self.page.locator("#blanksTable input[name='blankTypes[]']")
         for blank in question.blanks if not present else []:
-            before = len(run(self.page, "blanks"))
+            before = types.count()
             self.page.click("#addNewRange" if isinstance(blank, RangeBlank) else "#addNewBlank")
-            self.page.wait_for_function(
-                "n => document.querySelectorAll(\"#blanksTable input[name='blankTypes[]']\")"
-                ".length > n",
-                arg=before,
-            )
+            expect(types).to_have_count(before + 1, timeout=self.timeout_ms)
         rows = run(self.page, "blanks")
         sequences = [row["sequence"] for row in rows]
         if sequences != [str(n) for n in range(1, len(question.blanks) + 1)]:
@@ -456,7 +425,8 @@ class Portal:
         revision = int(ids.get("revNum") or (existing.revision if existing else 0))
         if not item_id:
             raise PortalError(f"save: no item id in {str(result)[:200]}")
-        return Saved(item_id, revision, edit_url(kind, item_id, revision))
+        url = f"{APP}/ei/question/{kind}/edit/s={SCHOOL},id={item_id},rev={revision}"
+        return Saved(item_id, revision, url)
 
     def read_back(self, question: Question, folder: Folder, title: str, url: str) -> list[str]:
         """Where the saved question, as its edit page shows it, differs from the spec."""
@@ -466,7 +436,6 @@ class Portal:
         except PlaywrightTimeoutError:
             self.open(url)
         self.wait_loaded()
-        run(self.page, "install")
         return self.editor_differences(question, folder, title)
 
     def open(self, url: str) -> None:
@@ -485,10 +454,6 @@ class Portal:
             "choices": [text(content_html(choice)) for choice in getattr(question, "choices", [])],
         }
         return differences(question, folder, title, run(self.page, "state"), texts)
-
-
-def edit_url(kind: str, item_id: int, revision: int) -> str:
-    return f"{APP}/ei/question/{kind}/edit/s={SCHOOL},id={item_id},rev={revision}"
 
 
 def run_if_loaded(page: Page, command: Literal["install", "messages", "loadDiagnostics"]) -> Any:  # noqa: ANN401

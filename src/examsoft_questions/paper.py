@@ -7,15 +7,17 @@ does not say (see the README).
 
 from __future__ import annotations
 
+import io
+import itertools
 import json
 import re
 import shutil
 import subprocess
-from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+import panflute as pf
 import yaml
 
 from .models import BLANK_MARKER, CASE_STUDY_TABS_MAX, TAB_TITLE_MAX
@@ -32,9 +34,6 @@ PART_PREFIX = re.compile(r"^Part\s+\w+\s*:\s*", re.I)
 MINUS = "\u2212"
 TITLE_LIMIT = 60
 CONFIG_KEYS = {"folder", "defaults", "parts", "questions"}
-
-Block = dict[str, Any]
-Inline = dict[str, Any]
 
 
 class PaperError(ValueError):
@@ -65,97 +64,51 @@ def pandoc(args: list[str], stdin: str) -> str:
     return result.stdout
 
 
-def read_ast(path: Path) -> dict[str, Any]:
-    ast: dict[str, Any] = json.loads(
-        pandoc(["-f", READER, "-t", "json"], path.read_text(encoding="utf-8"))
-    )
-    return ast
+def read_doc(path: Path) -> pf.Doc:
+    return pf.load(io.StringIO(pandoc(["-f", READER, "-t", "json"], path.read_text("utf-8"))))
 
 
-class HtmlWriter:
-    """Blocks to HTML with MathML formulas, in one pandoc run per document."""
-
-    def __init__(self, api: list[int]) -> None:
-        self.api = api
-
-    def __call__(self, blocks: list[Block]) -> str:
-        document = {"pandoc-api-version": self.api, "meta": {}, "blocks": blocks}
-        args = ["-f", "json", "-t", "html", "--mathml", "--wrap=none"]
-        return pandoc(args, json.dumps(document)).strip()
+def to_html(blocks: list[pf.Block], api: list[int]) -> str:
+    """Blocks to HTML with MathML formulas; `api` is the pandoc API version they were read in."""
+    blocks_json = [block.to_json() for block in blocks]
+    document = {"pandoc-api-version": api, "meta": {}, "blocks": blocks_json}
+    args = ["-f", "json", "-t", "html", "--mathml", "--wrap=none"]
+    return pandoc(args, json.dumps(document)).strip()
 
 
 # Inline text
 
 
-def plain(inlines: list[Inline]) -> str:
-    """Inline text as a reader sees it, with formulas as their TeX source."""
-    out: list[str] = []
-    for inline in inlines:
-        kind: str = inline["t"]
-        content: Any = inline.get("c")
-        if kind == "Str":
-            out.append(content)
-        elif kind in ("Space", "SoftBreak", "LineBreak"):
-            out.append(" ")
-        elif kind in ("Math", "Code"):
-            out.append(content[1])
-        elif kind in (
-            "Emph",
-            "Strong",
-            "Underline",
-            "Strikeout",
-            "SmallCaps",
-            "Superscript",
-            "Subscript",
-        ):
-            out.append(plain(content))
-        elif kind in ("Link", "Span"):
-            out.append(plain(content[1]))
-        elif kind == "Quoted":
-            out.append(f'"{plain(content[1])}"')
-    return " ".join("".join(out).split())
+def plain(element: pf.Element) -> str:
+    """Text as a reader sees it, with formulas as their TeX source."""
+    return " ".join(pf.stringify(element).split())
 
 
-def block_text(block: Block) -> str:
-    if block["t"] in ("Para", "Plain"):
-        return plain(block["c"])
-    if block["t"] == "Header":
-        return plain(block["c"][2])
-    return ""
+def bold_text(block: pf.Block) -> str | None:
+    """The text of a paragraph that is all bold, as `**1A. d**`."""
+    if isinstance(block, pf.Para) and len(block.content) == 1:
+        (only,) = block.content
+        if isinstance(only, pf.Strong):
+            return plain(only)
+    return None
 
 
-def local_links(blocks: list[Block]) -> Iterator[str]:
-    """The target of every link in the blocks that is not a URL or an anchor."""
-    stack: list[Any] = list(blocks)
-    while stack:
-        node = stack.pop()
-        if isinstance(node, list):
-            stack.extend(node)
-        elif isinstance(node, dict):
-            if node.get("t") == "Link":
-                target = node["c"][2][0]
-                if not EXTERNAL.match(target):
-                    yield target
-            stack.extend(node.values())
+def unlink(blocks: list[pf.Block]) -> list[str]:
+    """Replace each local link, which cannot resolve in ExamSoft, with its text.
 
+    Returns the links' targets.
+    """
+    targets: list[str] = []
 
-def unlink(node: Any) -> Any:  # noqa: ANN401 - pandoc's JSON AST
-    """Local links cannot resolve in ExamSoft: keep only their text."""
-    if isinstance(node, list):
-        out: list[Any] = []
-        for item in node:
-            if (
-                isinstance(item, dict)
-                and item.get("t") == "Link"
-                and not EXTERNAL.match(item["c"][2][0])
-            ):
-                out.extend(unlink(item["c"][1]))
-                continue
-            out.append(unlink(item))
-        return out
-    if isinstance(node, dict):
-        return {key: unlink(value) for key, value in node.items()}
-    return node
+    def action(element: pf.Element, _: pf.Doc) -> list[pf.Inline] | None:
+        if isinstance(element, pf.Link) and not EXTERNAL.match(element.url):
+            targets.append(element.url)
+            return list(element.content)
+        return None
+
+    for block in blocks:
+        block.walk(action)
+    return targets
 
 
 # Parts
@@ -165,7 +118,7 @@ def unlink(node: Any) -> Any:  # noqa: ANN401 - pandoc's JSON AST
 class Subquestion:
     label: str
     points: float
-    blocks: list[Block]
+    blocks: list[pf.Block]
     """The label paragraph and everything up to the next label, options included."""
 
 
@@ -174,21 +127,25 @@ class Part:
     name: str
     """The file name without `.md`."""
     title: str
-    context: list[Block]
+    context: list[pf.Block]
+    """Without its local links, which `links` holds."""
+    links: list[str]
+    api: list[int]
+    """The pandoc API version the part was read in."""
     subquestions: list[Subquestion] = field(default_factory=list)
 
 
-def read_part(path: Path) -> tuple[Part, list[int]]:
-    ast = read_ast(path)
+def read_part(path: Path) -> Part:
+    doc = read_doc(path)
     title = ""
-    sections: dict[str, list[Block]] = {}
-    current: list[Block] | None = None
-    for block in ast["blocks"]:
-        if block["t"] == "Header" and block["c"][0] == 1 and not title:
-            title = block_text(block)
+    sections: dict[str, list[pf.Block]] = {}
+    current: list[pf.Block] | None = None
+    for block in doc.content:
+        if isinstance(block, pf.Header) and block.level == 1 and not title:
+            title = plain(block)
             continue
-        if block["t"] == "Header" and block["c"][0] == 2:
-            current = sections.setdefault(block_text(block).lower(), [])
+        if isinstance(block, pf.Header) and block.level == 2:
+            current = sections.setdefault(plain(block).lower(), [])
             continue
         if current is not None:
             current.append(block)
@@ -196,7 +153,8 @@ def read_part(path: Path) -> tuple[Part, list[int]]:
         raise PaperError(f"{path}: no `# Part ...` heading")
     if "questions" not in sections:
         raise PaperError(f"{path}: no `## Questions` section")
-    part = Part(path.stem, title, sections.get("context", []))
+    context = sections.get("context", [])
+    part = Part(path.stem, title, context, unlink(context), list(doc.api_version))
     for block in sections["questions"]:
         found = label_of(block)
         if found:
@@ -206,13 +164,14 @@ def read_part(path: Path) -> tuple[Part, list[int]]:
             part.subquestions[-1].blocks.append(block)
     if not part.subquestions:
         raise PaperError(f"{path}: no `**1A. [n marks]**` subquestions")
-    return part, ast["pandoc-api-version"]
+    return part
 
 
-def label_of(block: Block) -> tuple[str, float] | None:
-    if block["t"] != "Para" or not block["c"] or block["c"][0]["t"] != "Strong":
+def label_of(block: pf.Block) -> tuple[str, float] | None:
+    if not (isinstance(block, pf.Para) and block.content):
         return None
-    match = LABEL.match(plain(block["c"][0]["c"]))
+    first = block.content[0]
+    match = LABEL.match(plain(first)) if isinstance(first, pf.Strong) else None
     return (match.group(1), float(match.group(2))) if match else None
 
 
@@ -220,29 +179,27 @@ def read_answers(path: Path) -> dict[str, str]:
     if not path.exists():
         raise PaperError(f"no solution file {path}")
     answers = {}
-    for block in read_ast(path)["blocks"]:
-        if block["t"] == "Para" and len(block["c"]) == 1 and block["c"][0]["t"] == "Strong":
-            match = ANSWER.match(plain(block["c"][0]["c"]))
-            if match:
-                answers[match.group(1).upper()] = match.group(2).strip()
+    for block in read_doc(path).content:
+        match = ANSWER.match(bold_text(block) or "")
+        if match:
+            answers[match.group(1).upper()] = match.group(2).strip()
     return answers
 
 
 # Questions
 
 
-def is_option_list(block: Block) -> bool:
-    return bool(block["t"] == "OrderedList" and block["c"][0][1]["t"] == "LowerAlpha")
+def is_option_list(block: pf.Block) -> bool:
+    return isinstance(block, pf.OrderedList) and block.style == "LowerAlpha"
 
 
-def option_blocks(item: list[Block]) -> list[Block]:
+def option_blocks(item: pf.ListItem) -> list[pf.Block]:
     """An option's blocks without the hard line break that ends `a. Yes  `."""
-    blocks = [dict(block) for block in item]
-    if blocks and blocks[0]["t"] in ("Plain", "Para"):
-        inlines = list(blocks[0]["c"])
-        while inlines and inlines[-1]["t"] in ("LineBreak", "SoftBreak", "Space"):
+    blocks = list(item.content)
+    if blocks and isinstance(blocks[0], (pf.Plain, pf.Para)):
+        inlines = blocks[0].content
+        while inlines and isinstance(inlines[-1], (pf.LineBreak, pf.SoftBreak, pf.Space)):
             inlines.pop()
-        blocks[0] = {"t": blocks[0]["t"], "c": inlines}
     return blocks
 
 
@@ -275,37 +232,27 @@ def numbered_answers(answer: str, count: int, label: str) -> list[str]:
     return [pairs[n] for n in range(1, count + 1)]
 
 
-def mark_blanks(blocks: list[Block]) -> tuple[list[Block], int]:
-    """Replace each `______` in the blocks with a `{{n}}` blank marker."""
-    count = 0
+def mark_blanks(blocks: list[pf.Block]) -> int:
+    """Replace each `______` in the blocks with a `{{n}}` blank marker; returns their count."""
+    numbers = itertools.count(1)
 
-    def walk(node: Any) -> Any:  # noqa: ANN401 - pandoc's JSON AST
-        nonlocal count
-        if isinstance(node, list):
-            return [walk(item) for item in node]
-        if isinstance(node, dict):
-            if node.get("t") == "Str" and BLANK_RUN.search(node["c"]):
+    def action(element: pf.Element, _: pf.Doc) -> None:
+        if isinstance(element, pf.Str):
+            element.text = BLANK_RUN.sub(lambda _: f"{{{{{next(numbers)}}}}}", element.text)
 
-                def number(_: re.Match[str]) -> str:
-                    nonlocal count
-                    count += 1
-                    return "{{" + str(count) + "}}"
-
-                return {"t": "Str", "c": BLANK_RUN.sub(number, node["c"])}
-            return {key: walk(value) for key, value in node.items()}
-        return node
-
-    return walk(blocks), count
+    for block in blocks:
+        block.walk(action)
+    return next(numbers) - 1
 
 
 def title_of(sub: Subquestion) -> str:
-    title = plain(sub.blocks[0]["c"])
+    title = plain(sub.blocks[0])
     if len(title) > TITLE_LIMIT:
         title = title[:TITLE_LIMIT].rsplit(" ", 1)[0] + "..."
     return title
 
 
-def split_options(sub: Subquestion) -> tuple[list[Block], list[list[Block]]]:
+def split_options(sub: Subquestion) -> tuple[list[pf.Block], list[list[pf.Block]]]:
     """The stem's blocks and each option's blocks.
 
     Options start at the first `a.` list. An option whose text is set apart from its
@@ -316,19 +263,18 @@ def split_options(sub: Subquestion) -> tuple[list[Block], list[list[Block]]]:
     first = next((i for i, block in enumerate(sub.blocks) if is_option_list(block)), None)
     if first is None:
         return sub.blocks, []
-    options: list[list[Block]] = []
+    options: list[list[pf.Block]] = []
     for block in sub.blocks[first:]:
-        if is_option_list(block) and block["c"][0][0] == len(options) + 1:
-            options.extend(option_blocks(item) for item in block["c"][1])
+        if is_option_list(block) and block.start == len(options) + 1:
+            options.extend(option_blocks(item) for item in block.content)
         elif is_option_list(block):
-            letter = chr(96 + block["c"][0][0])
-            raise PaperError(f"{sub.label}: option {letter}. is out of order")
+            raise PaperError(f"{sub.label}: option {chr(96 + block.start)}. is out of order")
         else:
             options[-1].append(block)
     return sub.blocks[:first], options
 
 
-def generated_question(sub: Subquestion, answer: str | None, html: HtmlWriter) -> dict[str, Any]:
+def generated_question(sub: Subquestion, answer: str | None, api: list[int]) -> dict[str, Any]:
     if answer is None:
         raise PaperError(f"{sub.label}: no `**{sub.label}. answer**` line in the solution")
     stem, options = split_options(sub)
@@ -337,22 +283,23 @@ def generated_question(sub: Subquestion, answer: str | None, html: HtmlWriter) -
         correct = correct_letters(answer, len(options), sub.label)
         base |= {
             "type": "mc",
-            "stem_html": html(stem),
+            "stem_html": to_html(stem, api),
             "choices": [
-                {"html": html(blocks), "correct": i in correct} for i, blocks in enumerate(options)
+                {"html": to_html(blocks, api), "correct": i in correct}
+                for i, blocks in enumerate(options)
             ],
         }
-        stem_text = " ".join(block_text(block) for block in stem)
+        stem_text = " ".join(plain(block) for block in stem)
         if len(correct) > 1 or SELECT_ALL.search(stem_text):
             base["scoring"] = "plus_minus"
         return base
-    marked, count = mark_blanks(stem)
+    count = mark_blanks(stem)
     if not count:
-        marked = [*marked, {"t": "Para", "c": [{"t": "Str", "c": "{{1}}"}]}]
+        stem = [*stem, pf.Para(pf.Str("{{1}}"))]
         count = 1
     base |= {
         "type": "fitb",
-        "stem_html": html(marked),
+        "stem_html": to_html(stem, api),
         "blanks": [
             {"answers": variants(text)} for text in numbered_answers(answer, count, sub.label)
         ],
@@ -370,9 +317,10 @@ def tab_title(title: str) -> str:
 def context_title(part: Part) -> str:
     """A context's own heading, a paragraph that is all bold (`**The Maze**`)."""
     for block in part.context:
-        if block["t"] == "Para" and len(block["c"]) == 1 and block["c"][0]["t"] == "Strong":
-            return tab_title(plain(block["c"][0]["c"]))
-        if block["t"] not in ("Para", "Plain") or block_text(block):
+        heading = bold_text(block)
+        if heading is not None:
+            return tab_title(heading)
+        if not isinstance(block, (pf.Para, pf.Plain)) or plain(block):
             break
     return tab_title(part.title)
 
@@ -408,13 +356,13 @@ def paper_spec(paper: Path, config_path: Path | None = None) -> dict[str, Any]:
     files = sorted((paper / "questions").glob("*.md"), key=natural_key)
     if not files:
         raise PaperError(f"no {paper / 'questions'}/*.md")
-    parts: dict[str, tuple[Part, list[int]]] = {f.name: read_part(f) for f in files}
+    parts = {f.name: read_part(f) for f in files}
     part_overrides: dict[str, Any] = config.get("parts") or {}
     question_overrides: dict[str, Any] = {
         str(k).upper(): v for k, v in (config.get("questions") or {}).items()
     }
-    unknown_parts = set(part_overrides) - {part.name for part, _ in parts.values()}
-    labels = [sub.label for part, _ in parts.values() for sub in part.subquestions]
+    unknown_parts = set(part_overrides) - {part.name for part in parts.values()}
+    labels = [sub.label for part in parts.values() for sub in part.subquestions]
     unknown_labels = set(question_overrides) - set(labels)
     if unknown_parts or unknown_labels:
         raise PaperError(
@@ -426,23 +374,22 @@ def paper_spec(paper: Path, config_path: Path | None = None) -> dict[str, Any]:
         raise PaperError(f"labels used more than once: {sorted(duplicates)}")
 
     questions: list[dict[str, Any]] = []
-    for filename, (part, api) in parts.items():
-        html = HtmlWriter(api)
+    for filename, part in parts.items():
         answers = read_answers(paper / "solutions" / filename)
         tabs = []
-        for target in local_links(part.context):
+        for target in part.links:
             linked = parts.get(Path(target.split("#")[0]).name)
-            if linked and linked[0] is not part and linked[0].context:
+            if linked and linked is not part and linked.context:
                 tabs.append(
-                    {"title": context_title(linked[0]), "html": html(unlink(linked[0].context))}
+                    {"title": context_title(linked), "html": to_html(linked.context, part.api)}
                 )
         if part.context:
-            tabs.append({"title": context_title(part), "html": html(unlink(part.context))})
+            tabs.append({"title": context_title(part), "html": to_html(part.context, part.api)})
         if len(tabs) > CASE_STUDY_TABS_MAX:
             raise PaperError(f"{filename}: more than {CASE_STUDY_TABS_MAX} case study tabs")
         case_study = tabs or None
         for sub in part.subquestions:
-            generated = generated_question(sub, answers.get(sub.label), html)
+            generated = generated_question(sub, answers.get(sub.label), part.api)
             generated["group"] = part.title
             if case_study:
                 generated["case_study"] = case_study

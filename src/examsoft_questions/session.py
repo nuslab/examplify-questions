@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Callable, Iterator
+from collections.abc import Iterator
 from contextlib import contextmanager, suppress
 from pathlib import Path
 
@@ -33,7 +33,7 @@ def signed_in(profile: Path, timeout_ms: float) -> Iterator[Page]:
         try:
             restore_session(context, session)
             page.on("dialog", accept)
-            sign_in(page, timeout_ms, lambda: print(LOGIN_PROMPT))
+            sign_in(page, timeout_ms)
             save_session(context, session)
             yield page
         finally:
@@ -53,15 +53,15 @@ def accept(dialog: Dialog) -> None:
         dialog.accept()
 
 
-def sign_in(page: Page, timeout_ms: float, prompt: Callable[[], None]) -> None:
+def sign_in(page: Page, timeout_ms: float) -> None:
     """Open the question bank, signing in through SSO when the session has lapsed.
 
-    `prompt` is called before signing in; SSO prompts wait in the browser without a timeout.
+    SSO prompts wait in the browser without a timeout.
     """
     page.goto(QUESTIONS, timeout=timeout_ms)
     if page.url.startswith(f"{APP}/ei/"):
         return
-    prompt()
+    print(LOGIN_PROMPT)
     if not page.url.startswith(LOGIN):
         page.goto(LOGIN, timeout=timeout_ms)
     page.click(FED_LOGIN, timeout=timeout_ms)

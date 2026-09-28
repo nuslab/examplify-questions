@@ -7,7 +7,7 @@ from examsoft_questions.folders import Folder
 from examsoft_questions.models import Essay, FillInTheBlank, TextBlank
 from examsoft_questions.portal import Item
 from examsoft_questions.spec import load
-from examsoft_questions.tags import has_tag, tag_for, tagged_in, tagged_title
+from examsoft_questions.tags import tag_for, tagged_in, tagged_title
 
 EXAMPLE = Path(__file__).parents[1] / "examples" / "sandbox.yaml"
 SANDBOX = Folder(("ITEMS", "Faculty", "2026 Fall", "CS101", "Sandbox"), "k8")
@@ -52,11 +52,6 @@ def test_tagged_title_uses_title_or_stem_start() -> None:
         blanks=[TextBlank(answers=["P"])],
     )
     assert tagged_title(fitb, "abc234") == "is the capital [abc234]"
-
-
-def test_has_tag_needs_the_brackets() -> None:
-    assert has_tag("1A. Primes [abc234]", "abc234")
-    assert not has_tag("abc234 appears in the stem", "abc234")
 
 
 def test_tagged_in_keeps_exact_tag_in_the_folder() -> None:

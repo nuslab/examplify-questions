@@ -34,11 +34,7 @@ def tagged_title(question: Question, tag: str) -> str:
     return f"{base} [{tag}]"
 
 
-def has_tag(title: str, tag: str) -> bool:
-    return f"[{tag}]" in title
-
-
 def tagged_in(results: list[Item], tag: str, folder: Folder) -> list[Item]:
     """Search results that are the tag's question: the exact `[tag]` in the title (the
     search also matches stems and choices), in the folder itself (not a subfolder)."""
-    return [item for item in results if has_tag(item.title, tag) and item.folder_key == folder.key]
+    return [item for item in results if f"[{tag}]" in item.title and item.folder_key == folder.key]
