@@ -215,6 +215,8 @@ questions:                                  # per label; replaces generated fiel
 A `parts` entry cannot override generated fields such as points. An entry for a
 part or label the paper does not have is an error.
 
+`examples/paper` is a complete two-part paper with its solutions and config.
+
 ## Development
 
 ```

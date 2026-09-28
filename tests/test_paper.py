@@ -11,6 +11,7 @@ from examsoft_questions.paper import MINUS, PaperError, dump_spec, paper_spec, v
 from examsoft_questions.spec import load
 
 PAPER = Path(__file__).parent / "fixtures" / "paper"
+EXAMPLE = Path(__file__).parents[1] / "examples" / "paper"
 
 
 @pytest.fixture(scope="module")
@@ -85,6 +86,12 @@ def test_dump_loads_as_a_valid_spec(spec: dict[str, Any], tmp_path: Path) -> Non
     loaded = load(out)
     assert len(loaded.questions) == 5
     assert yaml.safe_load(text)["defaults"]["folder"] == "CS101/Sandbox"
+
+
+def test_example_paper_is_a_valid_spec(tmp_path: Path) -> None:
+    out = tmp_path / "spec.yaml"
+    out.write_text(dump_spec(paper_spec(EXAMPLE)), encoding="utf-8")
+    assert [q.id for q in load(out).questions] == ["1A", "1B", "1C", "1D", "2A", "2B"]
 
 
 def test_variants() -> None:

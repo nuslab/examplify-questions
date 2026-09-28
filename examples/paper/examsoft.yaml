@@ -1,0 +1,11 @@
+# A two-part paper in Markdown, into a sandbox folder.
+# examsoft-questions import-md examples/paper -o paper.yaml
+# examsoft-questions create paper.yaml --dry-run
+
+folder: 2026 Fall/CS101/Sandbox
+defaults:
+  calculator: none
+parts:
+  q2-costs: {calculator: scientific}
+questions:
+  2B: {blanks: [{range: [2.99, 3.01]}]}
