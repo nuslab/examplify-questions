@@ -1,0 +1,51 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "examsoft-questions"
+version = "0.1.0"
+description = "Create ExamSoft (Examplify) questions from a YAML spec by driving an ExamSoft portal with Playwright"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Muhammad Rizki Aulia Rahman Maulana" }]
+requires-python = ">=3.14"
+dependencies = [
+    "playwright>=1.40,<2",
+    "pydantic>=2.7,<3",
+    "PyYAML>=6,<7",
+]
+
+[project.optional-dependencies]
+dev = ["ruff>=0.6", "mypy>=1.10", "pytest>=8", "types-PyYAML"]
+
+[project.scripts]
+examsoft-questions = "examsoft_questions.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+examsoft_questions = ["py.typed", "page.js"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py314"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "N", "RUF", "PL", "C4", "ANN"]
+ignore = ["PLR0913", "PLR2004"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["PLR0913", "PLR0915", "PLC1901"]
+
+[tool.mypy]
+python_version = "3.14"
+strict = true
+files = ["src", "tests"]
+warn_unreachable = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

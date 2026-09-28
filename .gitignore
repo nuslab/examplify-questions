@@ -1,0 +1,18 @@
+# Python
+.venv/
+__pycache__/
+*.egg-info/
+build/
+dist/
+
+# Tool caches
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+
+# Browser profiles hold the ExamSoft session; question specs may hold exam content
+browser-profile/
+examsoft-profile/
+data/
+screenshots/
+
