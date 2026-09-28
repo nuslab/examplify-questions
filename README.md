@@ -10,12 +10,14 @@ ExamSoft portal with Playwright:
   with `--approve`), and reports anything on its edit page that differs from the
   spec. `--dry-run` fills and checks the editors without saving.
 - `update` refills and saves the questions that differ from the spec. A draft is
-  saved in place; an approved question gets a new revision and is approved
-  again, so assessments can use it. It cannot change the number or kinds of a
-  fill-in-the-blank question's blanks.
+  saved in place (or approved, with `--approve`); an approved question gets a
+  new revision and is approved again, so assessments can use it. It cannot
+  change the number or kinds of a fill-in-the-blank question's blanks.
 - `verify` compares the questions in ExamSoft with the spec.
 
 `update` and `verify` skip a question that is open in another session.
+`create`, `update` and `verify` exit with status 1 if anything differs or could
+not be checked.
 
 Every title ends with a tag such as `[2btdfu]`, a short hash of the question's
 folder path and spec `id`. `create` skips questions whose tag ExamSoft already
@@ -26,7 +28,8 @@ tag from its title in the portal, makes the next `create` add it again.
 Multiple choice (one or several correct answers), fill in the blank (text and
 numeric-range blanks) and essay questions are supported, each optionally with a
 case study artefact. Formulas are written as MathML, since the portal has no
-LaTeX conversion, and become formula images.
+LaTeX conversion, and become formula images; `ℓ` and other characters the
+formula server cannot draw show as `?`. Images are not supported.
 
 ## Install
 
@@ -56,7 +59,8 @@ lapsed; complete any SSO prompts in the browser. The session is kept in the
 profile's `examsoft-session.json` between runs.
 
 `--only ID ...` limits a run to some questions. `--pause` waits for Enter before
-each save, to look at the filled editor.
+each save, to look at the filled editor. `--timeout` sets the seconds allowed
+per page action (60).
 
 ## Spec
 
@@ -173,9 +177,12 @@ a. Cell 1
 **2C. (1) 4, (2) −3**
 ```
 
-- Each part is a question group, and its Context is a case study tab on every
-  subquestion, titled by the Context's bold first line. A link in the Context
-  to another part's file adds that part's Context as an earlier tab.
+- Parts are taken in natural file-name order (`q2` before `q10`); text before
+  the first `##` heading is ignored.
+- Each part is a question group named by its `#` heading, and its Context is a
+  case study tab on every subquestion, titled by the Context's bold first line.
+  A link in the Context to another part's file adds that part's Context as an
+  earlier tab.
 - A subquestion with `a.`, `b.`, ... options is multiple choice. It is scored
   with +/- Partial Credit when it says "select all that apply" or has several
   correct options; "None of the above" is an ordinary option.
@@ -185,6 +192,8 @@ a. Cell 1
   and in lower, capitalised and upper case.
 - Points come from `[n marks]`, and the title is the label and the start of the
   stem. TeX formulas become MathML, and local links keep only their text.
+- Only the bold answer lines of a solution file are read; every subquestion
+  needs one.
 
 `PAPER/examsoft.yaml` (or `--config`) adds what the Markdown does not say:
 
@@ -197,7 +206,8 @@ questions:                                  # per label; replaces generated fiel
   2C: {blanks: [{answers: ["4", four]}, {range: [-3.01, -2.99]}]}
 ```
 
-An entry for a part or label the paper does not have is an error.
+A `parts` entry cannot override generated fields such as points. An entry for a
+part or label the paper does not have is an error.
 
 ## Development
 
@@ -207,4 +217,5 @@ ruff format --check . && ruff check . && mypy && pytest
 
 The portal is driven through its own page scripts (jQuery, CKEditor 3,
 fancytree), so ExamSoft's validation runs on every save; `page.js` holds the
-scripts run in the editor. Tests need pandoc but no ExamSoft account.
+scripts run in the editor. Tests need pandoc (bundled by the `dev` extra)
+but no ExamSoft account.
