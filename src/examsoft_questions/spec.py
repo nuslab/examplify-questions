@@ -1,23 +1,20 @@
-"""Loading a spec file and rendering its text as the HTML ExamSoft's editors hold."""
+"""Loading a spec file: questions with the defaults they share, validated."""
 
 from __future__ import annotations
 
-import html
 from pathlib import Path
 from typing import Any
 
 import yaml
 from pydantic import TypeAdapter, ValidationError
 
-from .models import BLANK_MARKER, Content, Essay, FillInTheBlank, MultipleChoice, Question, Spec
+from .models import DiscriminatedQuestion, Essay, FillInTheBlank, MultipleChoice, Question, Spec
 
-QUESTION_TYPES: dict[str, type[MultipleChoice | FillInTheBlank | Essay]] = {
+QUESTION_TYPES: dict[str, type[Question]] = {
     "mc": MultipleChoice,
     "fitb": FillInTheBlank,
     "essay": Essay,
 }
-BLANK_IMAGE = '<img alt="" src="/STW-war/resources/images/blanks/blank_{n}.jpg" />'
-"""The editor's placeholder for blank n, as inserted by its Add New Blank button."""
 
 
 class SpecError(ValueError):
@@ -42,7 +39,7 @@ def load(path: Path) -> Spec:
     misspelled = set(defaults) - known - {"id", "type"}
     if misspelled:
         raise SpecError(f"{path}: unknown fields in defaults {sorted(misspelled)}")
-    adapter: TypeAdapter[MultipleChoice | FillInTheBlank | Essay] = TypeAdapter(Question)
+    adapter: TypeAdapter[Question] = TypeAdapter(DiscriminatedQuestion)
     questions = []
     problems = []
     for number, raw_question in enumerate(raw["questions"], start=1):
@@ -82,24 +79,3 @@ def with_defaults(question: object, defaults: dict[str, Any]) -> object:
         return question
     applicable = {key: value for key, value in defaults.items() if key in model.model_fields}
     return applicable | question
-
-
-def paragraphs(text: str) -> str:
-    """Plain text as HTML: blank lines separate paragraphs, single newlines break lines."""
-    blocks = [block.strip("\n") for block in text.strip().split("\n\n")]
-    return "".join(
-        "<p>" + "<br />".join(html.escape(line) for line in block.split("\n")) + "</p>"
-        for block in blocks
-        if block.strip()
-    )
-
-
-def content_html(content: Content) -> str:
-    return content.html if content.html is not None else paragraphs(content.text or "")
-
-
-def stem_html(question: MultipleChoice | FillInTheBlank | Essay) -> str:
-    body = question.stem_html if question.stem_html is not None else paragraphs(question.stem or "")
-    if isinstance(question, FillInTheBlank):
-        return BLANK_MARKER.sub(lambda m: BLANK_IMAGE.format(n=int(m.group(1))), body)
-    return body

@@ -7,7 +7,7 @@ from typing import Any
 import pytest
 import yaml
 
-from examsoft_questions.markdown import MINUS, PaperError, convert, dump, variants
+from examsoft_questions.paper import MINUS, PaperError, dump_spec, paper_spec, variants
 from examsoft_questions.spec import load
 
 PAPER = Path(__file__).parent / "fixtures" / "paper"
@@ -15,7 +15,7 @@ PAPER = Path(__file__).parent / "fixtures" / "paper"
 
 @pytest.fixture(scope="module")
 def spec() -> dict[str, Any]:
-    return convert(PAPER)
+    return paper_spec(PAPER)
 
 
 def by_id(spec: dict[str, Any]) -> dict[str, dict[str, Any]]:
@@ -78,7 +78,7 @@ def test_case_study_and_group(spec: dict[str, Any]) -> None:
 
 
 def test_dump_loads_as_a_valid_spec(spec: dict[str, Any], tmp_path: Path) -> None:
-    text = dump(spec)
+    text = dump_spec(spec)
     assert text.count("&id001") == 1
     out = tmp_path / "spec.yaml"
     out.write_text(text, encoding="utf-8")
@@ -126,7 +126,7 @@ def test_errors(tmp_path: Path, change: Any, message: str) -> None:  # noqa: ANN
     paper = paper_copy(tmp_path)
     change(paper)
     with pytest.raises(PaperError, match=message.replace("*", r"\*").replace("(", r"\(")):
-        convert(paper)
+        paper_spec(paper)
 
 
 def test_too_many_case_study_tabs(tmp_path: Path) -> None:
@@ -140,4 +140,4 @@ def test_too_many_case_study_tabs(tmp_path: Path) -> None:
         (tmp_path / "questions" / f"p{n}.md").write_text(body)
         (tmp_path / "solutions" / f"p{n}.md").write_text(f"**{n}A. 1**\n")
     with pytest.raises(PaperError, match="more than 5 case study tabs"):
-        convert(tmp_path)
+        paper_spec(tmp_path)

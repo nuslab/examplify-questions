@@ -5,44 +5,41 @@ from __future__ import annotations
 import json
 import re
 import time
-from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Final, Literal
 
-from playwright.sync_api import BrowserContext, Page, Route
 from playwright.sync_api import Error as PlaywrightError
+from playwright.sync_api import Page, Route
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
-from .folders import Folder, FolderError, folders, missing_tail, resolve
-from .models import CaseStudyTab, Essay, FillInTheBlank, MultipleChoice, RangeBlank, TextBlank
-from .spec import content_html, stem_html
-from .tags import has_tag
+from .compare import differences
+from .folders import Folder, FolderError, flatten_tree, missing_tail, resolve
+from .models import (
+    CALCULATORS,
+    CaseStudyTab,
+    Essay,
+    FillInTheBlank,
+    MultipleChoice,
+    Question,
+    RangeBlank,
+    TextBlank,
+)
+from .render import content_html, stem_html, strip_tags
+from .tags import tagged_in
 
 HOST = "https://examsoft.example.com"
-LOGIN = f"{HOST}/GKWeb/login/myschool"
 APP = f"{HOST}/STW-war"
 SCHOOL = "myschool"
 QUESTIONS = f"{APP}/ei/questions/s={SCHOOL}"
-COOKIE_DOMAIN = "examsoft.com"
-SESSION_FILE = "examsoft-session.json"
-"""Saved in the browser profile, next to the cookies Chromium keeps itself."""
-FED_LOGIN = "#emFedLoginLink"
-"""The Exam Maker panel's SSO login link; `#etFedLoginLink` is the exam takers' one."""
-EDITORS: dict[str, str] = {"mc": "mcq", "fitb": "fitb", "essay": "essay"}
+EDITOR_KINDS: dict[str, str] = {"mc": "mcq", "fitb": "fitb", "essay": "essay"}
+"""The portal's editor, in its URLs and button ids, per question `type`."""
 SCORING_BOXES = {
     "partial": "#proportionateScoringMC",
     "all_or_nothing": "#enableAllThatApplyMC",
     "plus_minus": "#plusMinusScoringMC",
 }
-CALCULATORS = {
-    "none": (False, False),
-    "scientific": (False, True),
-    "graphing": (True, False),
-    "both": (True, True),
-}
-"""(graphing, scientific) checkbox states per `calculator`."""
 FOLDER_RESOURCE = "0"
 """The portal's resource type of question folders (1 assessments, 2 categories, 4 rubrics)."""
 MATHML = re.compile(r"<math\b.*?</math>", re.S)
@@ -58,8 +55,7 @@ REDIRECT_MS = 10_000
 """How long to wait for the editor's own redirect after a save."""
 SCRIPT = Path(__file__).with_name("page.js").read_text(encoding="utf-8")
 
-AnyQuestion = MultipleChoice | FillInTheBlank | Essay
-Status = Literal["Draft", "Approved"]
+SaveStatus = Literal["Draft", "Approved"]
 
 
 class PortalError(RuntimeError):
@@ -74,7 +70,7 @@ class Saved:
 
 
 @dataclass(frozen=True)
-class Found:
+class Item:
     """A question from the portal's keyword search, at its latest revision."""
 
     item_id: int
@@ -91,38 +87,6 @@ def run(page: Page, command: str, **args: object) -> Any:  # noqa: ANN401 - JSON
 
 def wait(page: Page, command: str, timeout_ms: float, **args: object) -> None:
     page.wait_for_function(SCRIPT, arg={"command": command, **args}, timeout=timeout_ms)
-
-
-def sign_in(page: Page, timeout_ms: float, prompt: Callable[[], None]) -> None:
-    """Open the question bank, signing in through SSO when the session has lapsed.
-
-    `prompt` is called before signing in; SSO prompts wait in the browser without a timeout.
-    """
-    page.goto(QUESTIONS, timeout=timeout_ms)
-    if page.url.startswith(f"{APP}/ei/"):
-        return
-    prompt()
-    if not page.url.startswith(LOGIN):
-        page.goto(LOGIN, timeout=timeout_ms)
-    page.click(FED_LOGIN, timeout=timeout_ms)
-    page.wait_for_url(f"{APP}/ei/**", timeout=0)
-    if not page.url.startswith(QUESTIONS):
-        page.goto(QUESTIONS, timeout=timeout_ms)
-
-
-def save_session(context: BrowserContext, path: Path) -> None:
-    """Keep ExamSoft's session cookies, which Chromium drops at its next start."""
-    cookies = [c for c in context.cookies() if c["domain"].endswith(COOKIE_DOMAIN)]
-    temporary = path.with_suffix(".tmp")
-    temporary.write_text(json.dumps(cookies), encoding="utf-8")
-    temporary.chmod(0o600)
-    temporary.replace(path)
-
-
-def restore_session(context: BrowserContext, path: Path) -> None:
-    if path.exists():
-        with suppress(ValueError, PlaywrightError):
-            context.add_cookies(json.loads(path.read_text(encoding="utf-8")))
 
 
 class Portal:
@@ -143,14 +107,14 @@ class Portal:
             )
             if not response.ok:
                 raise PortalError(f"folder tree: HTTP {response.status}")
-            self._folders = folders(response.json()["data"])
+            self._folders = flatten_tree(response.json()["data"])
         return self._folders
 
     def folder(self, path: tuple[str, ...], create: bool = False) -> Folder:
         try:
             return resolve(self.folders(), path)
         except FolderError:
-            if not create or any(f.path[-len(path) :] == path for f in self.folders()):
+            if not create or any(f.ends_with(path) for f in self.folders()):
                 raise
         parent, names = missing_tail(self.folders(), path)
         for name in names:
@@ -176,7 +140,7 @@ class Portal:
 
     # Search and locks
 
-    def find(self, term: str, folder: Folder | None = None) -> list[Found]:
+    def find(self, term: str, folder: Folder | None = None) -> list[Item]:
         """Questions whose ID, title, stem or choices contain `term`, as the portal searches.
 
         With `folder`, the search covers only that folder.
@@ -186,7 +150,7 @@ class Portal:
         if result.get("status") != "EI_OK":
             raise PortalError(f"searching for {term!r}: {messages(result)}")
         return [
-            Found(
+            Item(
                 item_id=int(row["itemID"]),
                 revision=int(row["revNum"]),
                 title=row["qnTitle"] or "",
@@ -197,9 +161,9 @@ class Portal:
             for row in result["rows"]
         ]
 
-    def find_tagged(self, question_tag: str, folder: Folder) -> list[Found]:
+    def find_tagged(self, tag: str, folder: Folder) -> list[Item]:
         """The questions in `folder` whose title carries the tag."""
-        return tagged_in(self.find(question_tag, folder), question_tag, folder)
+        return tagged_in(self.find(tag, folder), tag, folder)
 
     def lock(self, item_id: int, revision: int) -> bool:
         """Take the edit lock the portal takes before opening an editor; False if held."""
@@ -244,20 +208,20 @@ class Portal:
                 return
             except PlaywrightTimeoutError:
                 if attempt == attempts:
-                    state = run_if_loaded(self.page, "loadState")
+                    state = run_if_loaded(self.page, "loadDiagnostics")
                     raise PortalError(f"the editor did not finish loading: {state}") from None
                 run_if_loaded(self.page, "install")
                 self.page.reload(timeout=self.timeout_ms, wait_until=READY)
 
     def fill(
-        self, question: AnyQuestion, folder: Folder, title: str, existing: Found | None = None
+        self, question: Question, folder: Folder, title: str, existing: Item | None = None
     ) -> None:
         """Fill in a new question of the question's type, or `existing`, without saving.
 
         An existing question must be locked to this session (`lock`) first.
         """
         if existing is None:
-            self.open_editor(EDITORS[question.type])
+            self.open_editor(EDITOR_KINDS[question.type])
         else:
             self.open(existing.url)
             self.wait_loaded()
@@ -450,12 +414,12 @@ class Portal:
                     fields.nth(1).fill(number(blank.range[1]))
         self.page.locator("#proportionateScoring1").set_checked(question.partial_credit)
 
-    def save(self, question: AnyQuestion, status: Status, existing: Found | None = None) -> Saved:
+    def save(self, question: Question, status: SaveStatus, existing: Item | None = None) -> Saved:
         """Press Save (Draft) or Approve; the question exists once this returns.
 
         On an existing question's edit page the buttons save it in place.
         """
-        kind = EDITORS[question.type]
+        kind = EDITOR_KINDS[question.type]
         action, button = ("editSave", "Edit") if existing is not None else ("save", "")
         captured: dict[str, Any] = {}
 
@@ -494,7 +458,7 @@ class Portal:
             raise PortalError(f"save: no item id in {str(result)[:200]}")
         return Saved(item_id, revision, edit_url(kind, item_id, revision))
 
-    def read_back(self, question: AnyQuestion, folder: Folder, title: str, url: str) -> list[str]:
+    def read_back(self, question: Question, folder: Folder, title: str, url: str) -> list[str]:
         """Where the saved question, as its edit page shows it, differs from the spec."""
         # Save reloads into the edit page; Approve stays put, so open it then.
         try:
@@ -503,13 +467,13 @@ class Portal:
             self.open(url)
         self.wait_loaded()
         run(self.page, "install")
-        return self.differences(question, folder, title)
+        return self.editor_differences(question, folder, title)
 
     def open(self, url: str) -> None:
         run_if_loaded(self.page, "install")
         self.page.goto(url, timeout=self.timeout_ms, wait_until=READY)
 
-    def differences(self, question: AnyQuestion, folder: Folder, title: str) -> list[str]:
+    def editor_differences(self, question: Question, folder: Folder, title: str) -> list[str]:
         """Compare what the open editor holds with the spec; stems and choices by their text."""
 
         def text(html: str) -> str:
@@ -523,91 +487,11 @@ class Portal:
         return differences(question, folder, title, run(self.page, "state"), texts)
 
 
-def differences(
-    question: AnyQuestion,
-    folder: Folder,
-    title: str,
-    state: dict[str, Any],
-    texts: dict[str, Any],
-) -> list[str]:
-    found: list[str] = []
-
-    def check(name: str, expected: object, actual: object) -> None:
-        if expected != actual:
-            found.append(f"{name}: expected {expected!r}, found {actual!r}")
-
-    check("folder", folder.key, state["folderKey"])
-    check("title", title, state["title"])
-    check("points", question.points, as_float(state["weight"]))
-    check("group", question.group or "", state["group"] or "")
-    check("cut score", question.cut_score, as_float(state["cutScore"]))
-    check("rationale", (question.rationale or "").strip(), (state["rationale"] or "").strip())
-    check("stem", texts["stem"], state["stem"])
-    expected_tabs = [
-        {"title": tab.title, "text": text}
-        for tab, text in zip(question.case_study or [], texts["caseStudy"], strict=True)
-    ]
-    check("case study", expected_tabs, state["caseStudy"])
-    options = state["options"]
-    graphing, scientific = CALCULATORS[question.calculator]
-    check("graphing calculator", graphing, options["graphing"])
-    check("scientific calculator", scientific, options["scientific"])
-    check("spreadsheet", question.spreadsheet, options["spreadsheet"])
-    match question:
-        case MultipleChoice():
-            scoring = question.effective_scoring
-            check("partial credit", scoring == "partial", options["partial"])
-            # The editor ticks and locks Select All That Apply along with +/- Partial Credit.
-            all_that_apply = scoring in ("all_or_nothing", "plus_minus")
-            check("select all that apply", all_that_apply, options["allThatApply"])
-            check("+/- partial credit", scoring == "plus_minus", options["plusMinus"])
-            check("randomize choices", question.randomize_choices, options["randomize"])
-            expected_choices = [
-                {"text": text, "correct": choice.correct, "locked": choice.locked}
-                for text, choice in zip(texts["choices"], question.choices, strict=True)
-            ]
-            check("choices", expected_choices, state["choices"])
-        case FillInTheBlank():
-            check("partial credit", question.partial_credit, options["partial"])
-            check("blanks in stem", len(question.blanks), state["stemBlanks"])
-            check(
-                "blanks",
-                [blank_state(b) for b in question.blanks],
-                [normal_blank(b) for b in state["blanks"]],
-            )
-        case Essay():
-            check("character limit", question.char_limit, as_int(state["charLimit"]))
-    return found
-
-
-def tagged_in(results: list[Found], question_tag: str, folder: Folder) -> list[Found]:
-    """Search results that are the tag's question: the exact `[tag]` in the title (the
-    search also matches stems and choices), in the folder itself (not a subfolder)."""
-    return [
-        found
-        for found in results
-        if has_tag(found.title, question_tag) and found.folder_key == folder.key
-    ]
-
-
 def edit_url(kind: str, item_id: int, revision: int) -> str:
     return f"{APP}/ei/question/{kind}/edit/s={SCHOOL},id={item_id},rev={revision}"
 
 
-def blank_state(blank: TextBlank | RangeBlank) -> tuple[str, tuple[str | float, ...]]:
-    if isinstance(blank, TextBlank):
-        return ("BLANK", tuple(blank.answers))
-    return ("RANGE", blank.range)
-
-
-def normal_blank(row: dict[str, Any]) -> tuple[str, tuple[str | float, ...]]:
-    """An editor blank row; saved text answers come back with a trailing `|`."""
-    if row["type"] == "RANGE":
-        return ("RANGE", tuple(float(value) for value in row["values"]))
-    return (row["type"], tuple(a for a in "|".join(row["values"]).split("|") if a))
-
-
-def run_if_loaded(page: Page, command: Literal["install", "messages", "loadState"]) -> Any:  # noqa: ANN401
+def run_if_loaded(page: Page, command: Literal["install", "messages", "loadDiagnostics"]) -> Any:  # noqa: ANN401
     """Run a command if the page is an editor; mid-navigation, there is nothing to run it in."""
     with suppress(PlaywrightError):
         if page.evaluate("() => !!(window.EIUtil && window.jQuery)"):
@@ -622,17 +506,9 @@ def messages(result: dict[str, Any]) -> str:
     texts = [
         item.get("message", str(item)) if isinstance(item, dict) else str(item) for item in items
     ]
-    plain = [re.sub(r"<[^>]+>", "", text) for text in texts]
+    plain = [strip_tags(text) for text in texts]
     return "; ".join(plain) or f"status {result.get('status')}"
 
 
 def number(value: float) -> str:
     return str(int(value)) if float(value).is_integer() else repr(float(value))
-
-
-def as_float(value: str | None) -> float | None:
-    return float(value) if value not in (None, "") else None
-
-
-def as_int(value: str | None) -> int | None:
-    return int(value) if value not in (None, "") else None

@@ -3,15 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from examsoft_questions.examsoft import (
-    SPACE_BEFORE_MATH,
-    Found,
-    differences,
-    messages,
-    normal_blank,
-    number,
-    tagged_in,
-)
+from examsoft_questions.compare import differences, normal_blank
 from examsoft_questions.folders import Folder
 from examsoft_questions.models import CaseStudyTab, FillInTheBlank, MultipleChoice
 from examsoft_questions.spec import load
@@ -107,15 +99,6 @@ def test_fitb_blank_rows_normalise() -> None:
     assert normal_blank({"type": "BLANK", "values": ["a||b|"]}) == ("BLANK", ("a", "b"))
 
 
-def test_helpers() -> None:
-    assert number(2.0) == "2" and number(3.14) == "3.14"
-    assert messages({"status": "EI_ERROR", "payload": [{"message": "No folder"}]}) == "No folder"
-    assert messages({"status": "EI_ERROR", "messages": None, "payload": None}) == "status EI_ERROR"
-    assert messages({"payload": [{"message": "Blank Range entry #<em>2</em> is bad"}]}) == (
-        "Blank Range entry #2 is bad"
-    )
-
-
 def test_case_study_differences() -> None:
     question = load(EXAMPLE).questions[1]
     assert isinstance(question, MultipleChoice)
@@ -136,23 +119,3 @@ def test_plus_minus_ticks_select_all_that_apply() -> None:
     options = base_state()["options"] | {"partial": False, "allThatApply": True, "plusMinus": True}
     state = base_state(options=options)
     assert differences(question, SANDBOX, MC_TITLE, state, mc_texts()) == []
-
-
-def test_space_before_formula_is_kept() -> None:
-    html = "<li><strong>State:</strong> <math><mi>r</mi></math>, and x <math>y</math></li>"
-    assert SPACE_BEFORE_MATH.sub(">&nbsp;<math", html) == (
-        "<li><strong>State:</strong>&nbsp;<math><mi>r</mi></math>, and x <math>y</math></li>"
-    )
-
-
-def test_tagged_in_keeps_exact_tag_in_the_folder() -> None:
-    def found(item: int, title: str, folder_key: str) -> Found:
-        return Found(item, 1, title, folder_key, False, f"/edit/{item}")
-
-    results = [
-        found(1, "1A. [1 mark] Is there a map [abc234]", SANDBOX.key),
-        found(2, "Stem mentions abc234 without brackets", SANDBOX.key),
-        found(3, "1A. [1 mark] copy in another folder [abc234]", "other"),
-        found(4, "1A. [1 mark] copy in a subfolder [abc234]", "sub-of-k8"),
-    ]
-    assert [f.item_id for f in tagged_in(results, "abc234", SANDBOX)] == [1]

@@ -36,7 +36,7 @@
           ((window.caseStudyObject && caseStudyObject.length) || 0) &&
         document.querySelector("#createQuestionForm"));
 
-    case "loadState":
+    case "loadDiagnostics":
       return {
         url: location.href,
         scripts: !!(window.jQuery && window.EIUtil && window.CKEDITOR),
@@ -148,7 +148,6 @@
         revision: value("#revNum"),
         title: value("#displayText"),
         folderKey: value("#folderUID"),
-        folderName: (document.querySelector("#selectedQuestionFolder") || {}).textContent?.trim() ?? "",
         weight: value("#weight"),
         group: value("#randomGroup"),
         cutScore: value("#cutScore"),

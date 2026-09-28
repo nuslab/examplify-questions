@@ -1,4 +1,4 @@
-"""The question spec: a YAML file of questions and the defaults they share."""
+"""The questions a spec describes, and the rules they must follow."""
 
 from __future__ import annotations
 
@@ -16,6 +16,13 @@ from pydantic import (
 )
 
 Calculator = Literal["none", "scientific", "graphing", "both"]
+CALCULATORS: dict[Calculator, tuple[bool, bool]] = {
+    "none": (False, False),
+    "scientific": (False, True),
+    "graphing": (True, False),
+    "both": (True, True),
+}
+"""(graphing, scientific) calculators per `calculator`."""
 MultipleAnswerScoring = Literal["partial", "all_or_nothing", "plus_minus"]
 """ExamSoft's three multiple-answer modes, which the editor keeps mutually exclusive.
 
@@ -27,13 +34,16 @@ MultipleAnswerScoring = Literal["partial", "all_or_nothing", "plus_minus"]
 """
 BLANK_MARKER = re.compile(r"\{\{\s*(\d+)\s*\}\}")
 """A FITB stem marks blank n (1-based, in `blanks` order) as `{{n}}`."""
+TAB_TITLE_MAX = 30
+"""The portal's case study tab title field takes at most 30 characters."""
+CASE_STUDY_TABS_MAX = 5
 
 
-class Strict(BaseModel):
+class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
 
-class Content(Strict):
+class Content(StrictModel):
     """Text given as plain text or as HTML, as for a stem or an answer choice."""
 
     text: str | None = None
@@ -55,11 +65,10 @@ class Choice(Content):
 class CaseStudyTab(Content):
     """One tab of a case study artefact, shown with the question in Examplify."""
 
-    title: Annotated[str, Field(min_length=1, max_length=30)]
-    """The tab's label; the portal's tab title field takes at most 30 characters."""
+    title: Annotated[str, Field(min_length=1, max_length=TAB_TITLE_MAX)]
 
 
-class QuestionBase(Strict):
+class QuestionBase(StrictModel):
     id: Annotated[str, Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$")]
     """The spec's own key for the question; with its folder, it makes the title tag."""
     title: str | None = None
@@ -76,7 +85,9 @@ class QuestionBase(Strict):
     cut_score: Annotated[float, Field(ge=0, le=1)] | None = None
     rationale: str | None = None
     """Shown to exam takers with their results, as ExamSoft's Rationale field."""
-    case_study: Annotated[list[CaseStudyTab], Field(min_length=1, max_length=5)] | None = None
+    case_study: (
+        Annotated[list[CaseStudyTab], Field(min_length=1, max_length=CASE_STUDY_TABS_MAX)] | None
+    ) = None
     """ExamSoft's case study artefact: up to 5 tabs of material beside the question."""
 
     @model_validator(mode="after")
@@ -117,7 +128,7 @@ class MultipleChoice(QuestionBase):
         return self.scoring
 
 
-class TextBlank(Strict):
+class TextBlank(StrictModel):
     answers: Annotated[list[Annotated[str, Field(min_length=1)]], Field(min_length=1)]
     """Accepted answers; ExamSoft joins them with `|`."""
 
@@ -130,7 +141,7 @@ class TextBlank(Strict):
         return answers
 
 
-class RangeBlank(Strict):
+class RangeBlank(StrictModel):
     range: tuple[float, float]
     """Inclusive lower and upper limit of an accepted number; ExamSoft needs lower < upper."""
 
@@ -179,11 +190,12 @@ class Essay(QuestionBase):
     char_limit: Annotated[int, Field(gt=0)] | None = None
 
 
-Question = Annotated[MultipleChoice | FillInTheBlank | Essay, Field(discriminator="type")]
+Question = MultipleChoice | FillInTheBlank | Essay
+DiscriminatedQuestion = Annotated[Question, Field(discriminator="type")]
 
 
-class Spec(Strict):
-    questions: Annotated[list[Question], Field(min_length=1)]
+class Spec(StrictModel):
+    questions: Annotated[list[DiscriminatedQuestion], Field(min_length=1)]
 
     @model_validator(mode="after")
     def unique_ids(self) -> Self:

@@ -9,32 +9,36 @@ from __future__ import annotations
 
 import base64
 import hashlib
-import html
-import re
+from typing import TYPE_CHECKING
 
 from .folders import Folder
-from .models import Essay, FillInTheBlank, MultipleChoice
-from .spec import stem_html
+from .models import Question
+from .render import plain_text, stem_html
+
+if TYPE_CHECKING:
+    from .portal import Item
 
 TAG_LENGTH = 6
 """Base32 characters: about 10^9 values, and unlike any word in a stem."""
-TITLE_FALLBACK = 20
+STEM_TITLE_CHARS = 20
 """Without a title, ExamSoft uses the stem's first 20 characters; so does the tagged title."""
 
 
-def tag(folder: Folder, question_id: str) -> str:
+def tag_for(folder: Folder, question_id: str) -> str:
     digest = hashlib.sha256(f"{folder.name}\n{question_id}".encode()).digest()
     return base64.b32encode(digest).decode().lower()[:TAG_LENGTH]
 
 
-def tagged_title(question: MultipleChoice | FillInTheBlank | Essay, question_tag: str) -> str:
-    base = question.title or plain_text(stem_html(question))[:TITLE_FALLBACK].rstrip()
-    return f"{base} [{question_tag}]"
+def tagged_title(question: Question, tag: str) -> str:
+    base = question.title or plain_text(stem_html(question))[:STEM_TITLE_CHARS].rstrip()
+    return f"{base} [{tag}]"
 
 
-def has_tag(title: str, question_tag: str) -> bool:
-    return f"[{question_tag}]" in title
+def has_tag(title: str, tag: str) -> bool:
+    return f"[{tag}]" in title
 
 
-def plain_text(markup: str) -> str:
-    return " ".join(html.unescape(re.sub(r"<[^>]+>", " ", markup)).split())
+def tagged_in(results: list[Item], tag: str, folder: Folder) -> list[Item]:
+    """Search results that are the tag's question: the exact `[tag]` in the title (the
+    search also matches stems and choices), in the folder itself (not a subfolder)."""
+    return [item for item in results if has_tag(item.title, tag) and item.folder_key == folder.key]

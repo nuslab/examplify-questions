@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 from dataclasses import dataclass
 
-TITLE, KEY, CHILDREN = 0, 1, 9
+NODE_TITLE, NODE_KEY, NODE_CHILDREN = 0, 1, 9
 """Positions in the tree endpoint's node arrays: [title, key, _, count, ..., children, ...]."""
 
 
@@ -18,28 +18,31 @@ class Folder:
     def name(self) -> str:
         return "/".join(self.path)
 
+    def ends_with(self, tail: tuple[str, ...]) -> bool:
+        return self.path[-len(tail) :] == tail
+
 
 class FolderError(LookupError):
     """A spec folder path matches no folder, or more than one."""
 
 
-def folders(tree: object) -> list[Folder]:
+def flatten_tree(tree: object) -> list[Folder]:
     """Flatten the `data` of `/ei/questionstree/editablefolders`: one root node array."""
     return list(_walk(tree, ()))
 
 
 def _walk(node: object, parent: tuple[str, ...]) -> Iterator[Folder]:
-    if not isinstance(node, list) or len(node) <= CHILDREN:
+    if not isinstance(node, list) or len(node) <= NODE_CHILDREN:
         raise ValueError(f"unexpected folder tree node: {str(node)[:80]}")
-    path = (*parent, str(node[TITLE]))
-    yield Folder(path, str(node[KEY]))
-    for child in node[CHILDREN] or []:
+    path = (*parent, str(node[NODE_TITLE]))
+    yield Folder(path, str(node[NODE_KEY]))
+    for child in node[NODE_CHILDREN] or []:
         yield from _walk(child, path)
 
 
 def resolve(available: list[Folder], wanted: tuple[str, ...]) -> Folder:
     """The one folder whose path ends with `wanted`, e.g. `CS101/Final`."""
-    matches = [f for f in available if f.path[-len(wanted) :] == wanted]
+    matches = [f for f in available if f.ends_with(wanted)]
     if len(matches) == 1:
         return matches[0]
     name = "/".join(wanted)
@@ -54,6 +57,6 @@ def missing_tail(
 ) -> tuple[Folder, tuple[str, ...]]:
     """The deepest existing folder of `wanted` and the names still to create below it."""
     for split in range(len(wanted) - 1, 0, -1):
-        if any(f.path[-split:] == wanted[:split] for f in available):
+        if any(f.ends_with(wanted[:split]) for f in available):
             return resolve(available, wanted[:split]), wanted[split:]
     raise FolderError(f"no existing folder to create {'/'.join(wanted)!r} under")

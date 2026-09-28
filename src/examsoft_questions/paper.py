@@ -18,7 +18,7 @@ from typing import Any
 
 import yaml
 
-from .models import BLANK_MARKER
+from .models import BLANK_MARKER, CASE_STUDY_TABS_MAX, TAB_TITLE_MAX
 
 READER = "markdown+tex_math_single_backslash"
 LABEL = re.compile(r"^(\d+[A-Za-z])\.\s*\[(\d+(?:\.\d+)?)\s*marks?\]$")
@@ -30,11 +30,8 @@ EXTERNAL = re.compile(r"^[a-zA-Z][\w+.-]*:|^#")
 """A URL or an anchor, as opposed to a link to another file of the paper."""
 PART_PREFIX = re.compile(r"^Part\s+\w+\s*:\s*", re.I)
 MINUS = "\u2212"
-TAB_TITLE_LIMIT = 30
-TAB_LIMIT = 5
 TITLE_LIMIT = 60
 CONFIG_KEYS = {"folder", "defaults", "parts", "questions"}
-GENERATED = {"id", "type", "title", "stem_html", "choices", "blanks", "points", "scoring", "group"}
 
 Block = dict[str, Any]
 Inline = dict[str, Any]
@@ -75,7 +72,7 @@ def read_ast(path: Path) -> dict[str, Any]:
     return ast
 
 
-class Html:
+class HtmlWriter:
     """Blocks to HTML with MathML formulas, in one pandoc run per document."""
 
     def __init__(self, api: list[int]) -> None:
@@ -331,7 +328,7 @@ def split_options(sub: Subquestion) -> tuple[list[Block], list[list[Block]]]:
     return sub.blocks[:first], options
 
 
-def question(sub: Subquestion, answer: str | None, html: Html) -> dict[str, Any]:
+def generated_question(sub: Subquestion, answer: str | None, html: HtmlWriter) -> dict[str, Any]:
     if answer is None:
         raise PaperError(f"{sub.label}: no `**{sub.label}. answer**` line in the solution")
     stem, options = split_options(sub)
@@ -367,7 +364,7 @@ def question(sub: Subquestion, answer: str | None, html: Html) -> dict[str, Any]
 
 def tab_title(title: str) -> str:
     title = PART_PREFIX.sub("", title).strip()
-    return title if len(title) <= TAB_TITLE_LIMIT else title[: TAB_TITLE_LIMIT - 3] + "..."
+    return title if len(title) <= TAB_TITLE_MAX else title[: TAB_TITLE_MAX - 3] + "..."
 
 
 def context_title(part: Part) -> str:
@@ -405,7 +402,7 @@ def load_config(path: Path) -> dict[str, Any]:
     return config
 
 
-def convert(paper: Path, config_path: Path | None = None) -> dict[str, Any]:
+def paper_spec(paper: Path, config_path: Path | None = None) -> dict[str, Any]:
     """The spec for a paper, ready to dump as YAML; case studies are shared objects."""
     config = load_config(config_path or paper / "examsoft.yaml")
     files = sorted((paper / "questions").glob("*.md"), key=natural_key)
@@ -430,7 +427,7 @@ def convert(paper: Path, config_path: Path | None = None) -> dict[str, Any]:
 
     questions: list[dict[str, Any]] = []
     for filename, (part, api) in parts.items():
-        html = Html(api)
+        html = HtmlWriter(api)
         answers = read_answers(paper / "solutions" / filename)
         tabs = []
         for target in local_links(part.context):
@@ -441,11 +438,11 @@ def convert(paper: Path, config_path: Path | None = None) -> dict[str, Any]:
                 )
         if part.context:
             tabs.append({"title": context_title(part), "html": html(unlink(part.context))})
-        if len(tabs) > TAB_LIMIT:
-            raise PaperError(f"{filename}: more than {TAB_LIMIT} case study tabs")
+        if len(tabs) > CASE_STUDY_TABS_MAX:
+            raise PaperError(f"{filename}: more than {CASE_STUDY_TABS_MAX} case study tabs")
         case_study = tabs or None
         for sub in part.subquestions:
-            generated = question(sub, answers.get(sub.label), html)
+            generated = generated_question(sub, answers.get(sub.label), html)
             generated["group"] = part.title
             if case_study:
                 generated["case_study"] = case_study
@@ -467,6 +464,6 @@ def _str(dumper: yaml.SafeDumper, value: str) -> yaml.ScalarNode:
 _Dumper.add_representer(str, _str)
 
 
-def dump(spec: dict[str, Any]) -> str:
+def dump_spec(spec: dict[str, Any]) -> str:
     """YAML with long HTML as literal blocks; a shared case study is written once (&anchor)."""
     return yaml.dump(spec, Dumper=_Dumper, sort_keys=False, allow_unicode=True, width=100)
