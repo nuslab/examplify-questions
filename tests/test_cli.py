@@ -29,3 +29,15 @@ def test_validate_reports_errors(tmp_path: Path, capsys: pytest.CaptureFixture[s
 def test_rejects_unknown_ids(command: str, capsys: pytest.CaptureFixture[str]) -> None:
     assert main([command, str(EXAMPLE), "--only", "nope"]) == 1
     assert "no questions with ids ['nope']" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("login_url", [None, "", "https://portal.example.com/school"])
+def test_needs_a_login_url(
+    login_url: str | None, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    if login_url is None:
+        monkeypatch.delenv("EXAMSOFT_LOGIN_URL", raising=False)
+    else:
+        monkeypatch.setenv("EXAMSOFT_LOGIN_URL", login_url)
+    assert main(["folders"]) == 1
+    assert "EXAMSOFT_LOGIN_URL" in capsys.readouterr().err

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -10,7 +11,7 @@ from pathlib import Path
 from .folders import Folder, FolderError
 from .models import Essay, FillInTheBlank, MultipleChoice, Question
 from .paper import PaperError, dump_spec, paper_spec
-from .portal import Item, Portal, PortalError, SaveStatus
+from .portal import Item, Portal, PortalError, SaveStatus, Site
 from .session import signed_in
 from .spec import SpecError, load
 from .tags import tag_for, tagged_title
@@ -22,6 +23,9 @@ CALCULATOR_LABELS: dict[str, list[str]] = {
     "graphing": ["graphing calculator"],
     "both": ["graphing and scientific calculators"],
 }
+
+LOGIN_URL_VARIABLE = "EXAMSOFT_LOGIN_URL"
+DEFAULT_PROFILE = Path.home() / ".examsoft-questions" / "profile"
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -35,7 +39,12 @@ def main(argv: list[str] | None = None) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     browser = argparse.ArgumentParser(add_help=False)
-    browser.add_argument("--profile", default="../data/examsoft-profile")
+    browser.add_argument(
+        "--profile",
+        type=Path,
+        default=DEFAULT_PROFILE,
+        help=f"browser profile, which keeps the session (default: {DEFAULT_PROFILE})",
+    )
     browser.add_argument(
         "--timeout",
         dest="timeout_ms",
@@ -105,6 +114,20 @@ def build_parser() -> argparse.ArgumentParser:
     return root
 
 
+def login_site() -> Site:
+    """The portal named by `$EXAMSOFT_LOGIN_URL`, the institution's Exam Maker login page."""
+    login_url = os.environ.get(LOGIN_URL_VARIABLE)
+    if not login_url:
+        raise PortalError(
+            f"set {LOGIN_URL_VARIABLE} to your institution's Exam Maker login page,"
+            " https://HOST/GKWeb/login/SCHOOL"
+        )
+    try:
+        return Site.from_login_url(login_url)
+    except ValueError as error:
+        raise PortalError(f"{LOGIN_URL_VARIABLE}: {error}") from None
+
+
 def cmd_import_md(args: argparse.Namespace) -> int:
     text = dump_spec(paper_spec(args.paper, args.config))
     if args.output is None:
@@ -124,8 +147,9 @@ def cmd_validate(args: argparse.Namespace) -> int:
 
 
 def cmd_folders(args: argparse.Namespace) -> int:
-    with signed_in(Path(args.profile), args.timeout_ms) as page:
-        for folder in Portal(page, args.timeout_ms).folders():
+    site = login_site()
+    with signed_in(site, args.profile, args.timeout_ms) as page:
+        for folder in Portal(page, site, args.timeout_ms).folders():
             if args.match.lower() in folder.name.lower():
                 print(folder.name)
     return 0
@@ -135,8 +159,9 @@ def cmd_create(args: argparse.Namespace) -> int:
     questions = selected(load(args.spec).questions, args.only)
     status: SaveStatus = "Approved" if args.approve else "Draft"
     problems = 0
-    with signed_in(Path(args.profile), args.timeout_ms) as page:
-        portal = Portal(page, args.timeout_ms)
+    site = login_site()
+    with signed_in(site, args.profile, args.timeout_ms) as page:
+        portal = Portal(page, site, args.timeout_ms)
         for target in targets(portal, questions, args.create_folders and not args.dry_run):
             question, folder, title = target.question, target.folder, target.title
             existing = portal.find_tagged(target.tag, folder)
@@ -159,8 +184,9 @@ def cmd_create(args: argparse.Namespace) -> int:
 def cmd_verify(args: argparse.Namespace) -> int:
     questions = selected(load(args.spec).questions, args.only)
     problems = 0
-    with signed_in(Path(args.profile), args.timeout_ms) as page:
-        portal = Portal(page, args.timeout_ms)
+    site = login_site()
+    with signed_in(site, args.profile, args.timeout_ms) as page:
+        portal = Portal(page, site, args.timeout_ms)
         for target in targets(portal, questions):
             existing = portal.find_tagged(target.tag, target.folder)
             if not existing:
@@ -187,8 +213,9 @@ def cmd_verify(args: argparse.Namespace) -> int:
 def cmd_update(args: argparse.Namespace) -> int:
     questions = selected(load(args.spec).questions, args.only)
     problems = 0
-    with signed_in(Path(args.profile), args.timeout_ms) as page:
-        portal = Portal(page, args.timeout_ms)
+    site = login_site()
+    with signed_in(site, args.profile, args.timeout_ms) as page:
+        portal = Portal(page, site, args.timeout_ms)
         for target in targets(portal, questions):
             question, folder, title = target.question, target.folder, target.title
             existing = portal.find_tagged(target.tag, folder)

@@ -1,7 +1,7 @@
 # examsoft-questions
 
-Creates ExamSoft (Examplify) questions from a YAML spec by driving an
-ExamSoft portal with Playwright:
+Creates ExamSoft (Examplify) questions from a YAML spec by driving your
+institution's ExamSoft portal with Playwright:
 
 - `import-md` converts a paper written in pandoc Markdown into a spec.
 - `validate` checks a spec offline.
@@ -44,6 +44,7 @@ bundled copy.
 ## Use
 
 ```
+export EXAMSOFT_LOGIN_URL=https://examsoft.example.com/GKWeb/login/myschool
 examsoft-questions import-md paper/ -o exam.yaml
 examsoft-questions validate exam.yaml
 examsoft-questions folders --match CS101
@@ -53,10 +54,15 @@ examsoft-questions update exam.yaml
 examsoft-questions verify exam.yaml
 ```
 
+`EXAMSOFT_LOGIN_URL` is your institution's Exam Maker login page,
+`https://HOST/GKWeb/login/SCHOOL`; the host and school code in it select the
+portal. The commands that sign in need it.
+
 The browser opens with a persistent profile (`--profile`, by default
-`../data/examsoft-profile`) and signs in through SSO when the session has
-lapsed; complete any SSO prompts in the browser. The session is kept in the
-profile's `examsoft-session.json` between runs.
+`~/.examsoft-questions/profile`). When the session has lapsed it opens the
+login page and follows its SSO link, if your institution has one; complete the
+sign-in in the browser. The session is kept in the profile's
+`examsoft-session.json` between runs.
 
 `--only ID ...` limits a run to some questions. `--pause` waits for Enter before
 each save, to look at the filled editor. `--timeout` sets the seconds allowed

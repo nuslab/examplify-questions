@@ -9,21 +9,24 @@ from pathlib import Path
 
 from playwright.sync_api import BrowserContext, Dialog, Page, sync_playwright
 from playwright.sync_api import Error as PlaywrightError
+from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
-from .portal import APP, HOST, QUESTIONS, Portal
+from .portal import Portal, PortalError, Site
 
-LOGIN = f"{HOST}/GKWeb/login/myschool"
 COOKIE_DOMAIN = "examsoft.com"
 SESSION_FILE = "examsoft-session.json"
 """Saved in the browser profile, next to the cookies Chromium keeps itself."""
 FED_LOGIN = "#emFedLoginLink"
-"""The Exam Maker panel's SSO login link; `#etFedLoginLink` is the exam takers' one."""
-LOGIN_PROMPT = "Signing in through SSO. Complete any SSO prompts in the browser."
+"""The Exam Maker panel's identity provider (SSO) login link, shown when the school has one;
+`#etFedLoginLink` is the exam takers' one."""
+FED_LOGIN_MS = 5_000
+LOGIN_PROMPT = "Sign in to ExamSoft in the browser; the run goes on at the question bank."
 
 
 @contextmanager
-def signed_in(profile: Path, timeout_ms: float) -> Iterator[Page]:
+def signed_in(site: Site, profile: Path, timeout_ms: float) -> Iterator[Page]:
     """A page of the question bank in the profile's browser, closed on exit."""
+    profile.mkdir(mode=0o700, parents=True, exist_ok=True)
     with sync_playwright() as playwright:
         context: BrowserContext = playwright.chromium.launch_persistent_context(
             profile, headless=False, no_viewport=True
@@ -33,12 +36,12 @@ def signed_in(profile: Path, timeout_ms: float) -> Iterator[Page]:
         try:
             restore_session(context, session)
             page.on("dialog", accept)
-            sign_in(page, timeout_ms)
+            sign_in(page, site, timeout_ms)
             save_session(context, session)
             yield page
         finally:
             with suppress(PlaywrightError):
-                Portal(page).clear_locks()
+                Portal(page, site).clear_locks()
                 save_session(context, session)
             context.close()
 
@@ -53,21 +56,26 @@ def accept(dialog: Dialog) -> None:
         dialog.accept()
 
 
-def sign_in(page: Page, timeout_ms: float) -> None:
-    """Open the question bank, signing in through SSO when the session has lapsed.
+def sign_in(page: Page, site: Site, timeout_ms: float) -> None:
+    """Open the question bank, signing in when the session has lapsed.
 
-    SSO prompts wait in the browser without a timeout.
+    The login page's SSO link is followed when the school has one; the sign-in itself
+    waits in the browser without a timeout.
     """
-    page.goto(QUESTIONS, timeout=timeout_ms)
-    if page.url.startswith(f"{APP}/ei/"):
+    page.goto(site.questions, timeout=timeout_ms)
+    if page.url.startswith(f"{site.app}/ei/"):
         return
+    login_pages = f"{site.host}/GKWeb/login/"
+    if not page.url.startswith(login_pages):
+        page.goto(site.login, timeout=timeout_ms)
+    if not page.url.startswith(login_pages):
+        raise PortalError(f"{site.login} led to {page.url}; is {site.school!r} the school code?")
     print(LOGIN_PROMPT)
-    if not page.url.startswith(LOGIN):
-        page.goto(LOGIN, timeout=timeout_ms)
-    page.click(FED_LOGIN, timeout=timeout_ms)
-    page.wait_for_url(f"{APP}/ei/**", timeout=0)
-    if not page.url.startswith(QUESTIONS):
-        page.goto(QUESTIONS, timeout=timeout_ms)
+    with suppress(PlaywrightTimeoutError):
+        page.click(FED_LOGIN, timeout=FED_LOGIN_MS)
+    page.wait_for_url(f"{site.app}/ei/**", timeout=0)
+    if not page.url.startswith(site.questions):
+        page.goto(site.questions, timeout=timeout_ms)
 
 
 def save_session(context: BrowserContext, path: Path) -> None:

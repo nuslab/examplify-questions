@@ -9,6 +9,7 @@ from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Final, Literal
+from urllib.parse import urlsplit
 
 from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import Page, Route, expect
@@ -29,10 +30,7 @@ from .models import (
 from .render import content_html, stem_html, strip_tags
 from .tags import tagged_in
 
-HOST = "https://examsoft.example.com"
-APP = f"{HOST}/STW-war"
-SCHOOL = "myschool"
-QUESTIONS = f"{APP}/ei/questions/s={SCHOOL}"
+LOGIN_PATH = re.compile(r"/GKWeb/login/([^/]+)/?")
 EDITOR_KINDS: dict[str, str] = {"mc": "mcq", "fitb": "fitb", "essay": "essay"}
 """The portal's editor, in its URLs and button ids, per question `type`."""
 SCORING_BOXES = {
@@ -63,6 +61,37 @@ class PortalError(RuntimeError):
 
 
 @dataclass(frozen=True)
+class Site:
+    """An institution's ExamSoft portal: its host and school code."""
+
+    host: str
+    school: str
+
+    @classmethod
+    def from_login_url(cls, url: str) -> Site:
+        """The site of an Exam Maker login page, such as `https://HOST/GKWeb/login/SCHOOL`."""
+        parts = urlsplit(url)
+        path = LOGIN_PATH.fullmatch(parts.path)
+        if parts.scheme != "https" or not parts.netloc or not path:
+            raise ValueError(
+                f"{url!r} is not an ExamSoft login page, https://HOST/GKWeb/login/SCHOOL"
+            )
+        return cls(f"https://{parts.netloc}", path[1].lower())
+
+    @property
+    def app(self) -> str:
+        return f"{self.host}/STW-war"
+
+    @property
+    def login(self) -> str:
+        return f"{self.host}/GKWeb/login/{self.school}"
+
+    @property
+    def questions(self) -> str:
+        return f"{self.app}/ei/questions/s={self.school}"
+
+
+@dataclass(frozen=True)
 class Saved:
     item_id: int
     revision: int
@@ -90,8 +119,9 @@ def wait(page: Page, command: str, timeout_ms: float, **args: object) -> None:
 
 
 class Portal:
-    def __init__(self, page: Page, timeout_ms: float = 60_000) -> None:
+    def __init__(self, page: Page, site: Site, timeout_ms: float = 60_000) -> None:
         self.page = page
+        self.site = site
         self.timeout_ms = timeout_ms
         self._folders: list[Folder] | None = None
         self._rich: dict[str, str] = {}
@@ -103,7 +133,7 @@ class Portal:
         """Folders the account can add questions to, as the editor's folder picker lists them."""
         if self._folders is None or refresh:
             response = self.page.context.request.get(
-                f"{APP}/ei/questionstree/editablefolders", timeout=self.timeout_ms
+                f"{self.site.app}/ei/questionstree/editablefolders", timeout=self.timeout_ms
             )
             if not response.ok:
                 raise PortalError(f"folder tree: HTTP {response.status}")
@@ -131,7 +161,9 @@ class Portal:
             "resourceOriginalParentID": grandparent,
             "description": "",
         }
-        result = run(self.page, "post", url=f"{APP}/ei/resource/newResource", payload=payload)
+        result = run(
+            self.page, "post", url=f"{self.site.app}/ei/resource/newResource", payload=payload
+        )
         if result.get("status") != "EI_OK":
             raise PortalError(f"creating folder {name!r} in {parent.name}: {messages(result)}")
         created = Folder((*parent.path, name), str(result["payload"]))
@@ -154,7 +186,7 @@ class Portal:
                 title=row["qnTitle"] or "",
                 folder_key=row["folderUID"],
                 approved=bool(row["approved"]),
-                url=HOST + row["editUrl"],
+                url=self.site.host + row["editUrl"],
             )
             for row in result["rows"]
         ]
@@ -163,7 +195,10 @@ class Portal:
     def lock(self, item_id: int, revision: int) -> bool:
         """Take the edit lock the portal takes before opening an editor; False if held."""
         self._on_app_page()
-        url = f"{APP}/ei/question/refreshAndLock/s={SCHOOL},itemId={item_id},rev={revision}"
+        site = self.site
+        url = (
+            f"{site.app}/ei/question/refreshAndLock/s={site.school},itemId={item_id},rev={revision}"
+        )
         result = run(self.page, "post", url=url, payload=None)
         match result.get("status"):
             case "EI_OK":
@@ -175,11 +210,16 @@ class Portal:
     def clear_locks(self) -> None:
         """Release this session's edit locks; the portal otherwise holds them until logout."""
         if run_if_loaded(self.page, "install") is not None:
-            run(self.page, "post", url=f"{APP}/ei/locks/clearLocks/s={SCHOOL}", payload=None)
+            run(
+                self.page,
+                "post",
+                url=f"{self.site.app}/ei/locks/clearLocks/s={self.site.school}",
+                payload=None,
+            )
 
     def _on_app_page(self) -> None:
-        if not self.page.url.startswith(f"{APP}/ei/"):
-            self.page.goto(QUESTIONS, timeout=self.timeout_ms)
+        if not self.page.url.startswith(f"{self.site.app}/ei/"):
+            self.page.goto(self.site.questions, timeout=self.timeout_ms)
 
     # Editor
 
@@ -210,7 +250,11 @@ class Portal:
         An existing question must be locked to this session (`lock`) first.
         """
         kind = EDITOR_KINDS[question.type]
-        self.open(existing.url if existing else f"{APP}/ei/question/{kind}/create/s={SCHOOL}")
+        self.open(
+            existing.url
+            if existing
+            else f"{self.site.app}/ei/question/{kind}/create/s={self.site.school}"
+        )
         self.wait_loaded()
         self._rich = {}
         self.page.fill("#displayText", title)
@@ -425,7 +469,8 @@ class Portal:
         revision = int(ids.get("revNum") or (existing.revision if existing else 0))
         if not item_id:
             raise PortalError(f"save: no item id in {str(result)[:200]}")
-        url = f"{APP}/ei/question/{kind}/edit/s={SCHOOL},id={item_id},rev={revision}"
+        site = self.site
+        url = f"{site.app}/ei/question/{kind}/edit/s={site.school},id={item_id},rev={revision}"
         return Saved(item_id, revision, url)
 
     def read_back(self, question: Question, folder: Folder, title: str, url: str) -> list[str]:
