@@ -384,10 +384,12 @@ class Portal:
             row.locator("input[name='correctBool[]']").set_checked(choice.correct)
             row.locator("input[name='locked[]']").set_checked(choice.locked)
         # The three scoring boxes are mutually exclusive; clear before setting the one.
+        # +/- Partial Credit ticks and locks Select All That Apply, so it is cleared
+        # first, and Select All That Apply is left alone when +/- is wanted.
         scoring = question.effective_scoring
-        for mode, box in SCORING_BOXES.items():
-            if mode != scoring:
-                self.page.locator(box).set_checked(False)
+        for mode in ("plus_minus", "partial", "all_or_nothing"):
+            if mode != scoring and (mode, scoring) != ("all_or_nothing", "plus_minus"):
+                self.page.locator(SCORING_BOXES[mode]).set_checked(False)
         if scoring is not None:
             self.page.locator(SCORING_BOXES[scoring]).set_checked(True)
         self.page.locator("#randomizeChoices1").set_checked(question.randomize_choices)
