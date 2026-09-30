@@ -119,3 +119,10 @@ def test_plus_minus_ticks_select_all_that_apply() -> None:
     options = base_state()["options"] | {"partial": False, "allThatApply": True, "plusMinus": True}
     state = base_state(options=options)
     assert differences(question, SANDBOX, MC_TITLE, state, mc_texts()) == []
+
+
+def test_title_entities_match_their_characters() -> None:
+    question = load(EXAMPLE).questions[1]
+    title = "x=1 & y [abc234]"
+    state = base_state(title="x&#61;1 &amp; y [abc234]")
+    assert differences(question, SANDBOX, title, state, mc_texts()) == []

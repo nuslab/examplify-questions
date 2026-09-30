@@ -8,6 +8,9 @@
     const div = document.createElement("div");
     // Space block boundaries, which textContent would run together, as a reader sees them.
     div.innerHTML = html.replace(/<\/(p|div|li|h\d|tr|td)>|<br\s*\/?>/gi, " $&");
+    // Formula images stay in the text as ⟦source⟧, for the tool to read their MathML.
+    div.querySelectorAll("img[src*='/STW-war/sfr/']").forEach((img) =>
+      img.replaceWith(`⟦${img.getAttribute("src")}⟧`));
     return div.textContent.replace(/\s+/g, " ").trim();
   };
   const choiceRows = () => [...document.querySelectorAll("#mcqChoices tr.mcqRow")];

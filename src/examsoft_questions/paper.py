@@ -306,6 +306,8 @@ def generated_question(sub: Subquestion, answer: str | None, api: list[int]) -> 
     }
     if len(BLANK_MARKER.findall(base["stem_html"])) != count:
         raise PaperError(f"{sub.label}: blank markers were lost converting the stem")
+    if count > 1:
+        base["partial_credit"] = True
     return base
 
 

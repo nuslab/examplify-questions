@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import html
 from typing import Any
 
 from .folders import Folder
@@ -30,7 +31,8 @@ def differences(
             found.append(f"{name}: expected {expected!r}, found {actual!r}")
 
     check("folder", folder.key, state["folderKey"])
-    check("title", title, state["title"])
+    # The portal stores some characters of a title as entities, such as `=` as `&#61;`.
+    check("title", title, html.unescape(state["title"]))
     check("points", question.points, as_float(state["weight"]))
     check("group", question.group or "", state["group"] or "")
     check("cut score", question.cut_score, as_float(state["cutScore"]))

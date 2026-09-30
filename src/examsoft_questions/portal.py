@@ -7,9 +7,10 @@ import re
 import time
 from contextlib import suppress
 from dataclasses import dataclass
+from html import escape
 from pathlib import Path
 from typing import Any, Final, Literal
-from urllib.parse import urlsplit
+from urllib.parse import urljoin, urlsplit
 
 from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import Page, Route, expect
@@ -17,6 +18,7 @@ from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
 from .compare import differences
 from .folders import Folder, FolderError, flatten_tree, missing_tail, resolve
+from .formulas import MARKER, formula, png_mathml
 from .models import (
     CALCULATORS,
     CaseStudyTab,
@@ -493,14 +495,37 @@ class Portal:
         """Compare what the open editor holds with the spec; stems and choices by their text."""
 
         def text(html: str) -> str:
-            return str(run(self.page, "text", html=MATHML.sub("", html)))  # Formulas are images.
+            marked = MATHML.sub(lambda m: f"⟦{escape(formula(m.group(0)))}⟧", html)
+            return str(run(self.page, "text", html=marked))
 
         texts = {
             "stem": text(stem_html(question)),
             "caseStudy": [text(content_html(tab)) for tab in question.case_study or []],
             "choices": [text(content_html(choice)) for choice in getattr(question, "choices", [])],
         }
-        return differences(question, folder, title, run(self.page, "state"), texts)
+        state = run(self.page, "state")
+        state["stem"] = self.read_formulas(state["stem"])
+        for field in state["caseStudy"] + state["choices"]:
+            field["text"] = self.read_formulas(field["text"])
+        return differences(question, folder, title, state, texts)
+
+    def read_formulas(self, text: str | None) -> str | None:
+        """Replace each formula image's source in an editor's text with its formula."""
+
+        def read(match: re.Match[str]) -> str:
+            mathml = png_mathml(self.fetch(match.group(1)))
+            return f"⟦{formula(mathml)}⟧" if mathml else match.group(0)
+
+        return MARKER.sub(read, text) if text is not None else None
+
+    def fetch(self, source: str) -> bytes:
+        """A portal file; by this page's origin, as images are saved with `http:`."""
+        url = urljoin(self.page.url, urlsplit(source)._replace(scheme="", netloc="").geturl())
+        for attempt in range(LOAD_ATTEMPTS - 1):
+            with suppress(PlaywrightError):
+                return self.page.request.get(url, timeout=self.timeout_ms).body()
+            time.sleep(1 + attempt)
+        return self.page.request.get(url, timeout=self.timeout_ms).body()
 
 
 def run_if_loaded(page: Page, command: Literal["install", "messages", "loadDiagnostics"]) -> Any:  # noqa: ANN401

@@ -56,12 +56,14 @@ def test_fill_in_the_blank(spec: dict[str, Any]) -> None:
     assert appended["type"] == "fitb"
     assert appended["stem_html"].endswith("<p>{{1}}</p>")
     assert appended["blanks"] == [{"answers": ["3"]}]
+    assert "partial_credit" not in appended
     table = questions["10B"]
     assert "<td>(1) {{1}}</td>" in table["stem_html"]
     assert table["blanks"] == [
         {"answers": ["Max", "max", "MAX"]},
         {"answers": [MINUS + "1", "-1"]},
     ]
+    assert table["partial_credit"] is True
 
 
 def test_case_study_and_group(spec: dict[str, Any]) -> None:

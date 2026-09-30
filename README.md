@@ -124,10 +124,10 @@ Fields for every type:
 | `stem` / `stem_html` | Exactly one. `stem` is plain text: blank lines separate paragraphs. `stem_html` goes into the editor as is. |
 | `title` | ExamSoft's title, before the tag; the stem's first 20 characters when left out. |
 | `points` | ExamSoft's weight, 1 by default. |
-| `calculator` | `none`, `scientific`, `graphing` or `both`. |
-| `spreadsheet` | Enable Examplify's spreadsheet tool. |
+| `calculator` | `none` (the default), `scientific`, `graphing` or `both`. |
+| `spreadsheet` | Enable Examplify's spreadsheet tool; off by default. |
 | `group` | Keeps questions with the same group together on randomized assessments; set it in `defaults` to group a whole spec. |
-| `cut_score` | Between 0 and 1. |
+| `cut_score` | Between 0 and 1; unset by default. |
 | `rationale` | ExamSoft's Rationale field. |
 | `case_study` | ExamSoft's case study artefact: 1 to 5 tabs shown beside the question, each with a `title` (at most 30 characters) and `text` or `html`. |
 
@@ -135,14 +135,15 @@ Multiple choice (`mc`):
 
 | Field | Meaning |
 | --- | --- |
-| `choices` | At least two, each with `text` or `html`, and optional `correct` and `locked` (kept in place when choices are randomized). At least one must be correct. |
+| `choices` | At least two, each with `text` or `html`, and optional `correct` and `locked` (kept in place when choices are randomized), both false by default. At least one must be correct. |
 | `scoring` | For several correct choices: `partial` (Partial Credit; the default), `all_or_nothing` (Select All That Apply) or `plus_minus` (+/- Partial Credit). Leave it out for a single-answer question. |
-| `randomize_choices` | Shuffle the choices for each exam taker. |
+| `randomize_choices` | Shuffle the choices for each exam taker; off by default. |
 
 Fill in the blank (`fitb`): the stem marks blank *n* of `blanks` as `{{n}}`,
 each exactly once. A blank has either `answers` (accepted texts) or `range`
 (lower and upper limit of an accepted number; the lower must be below the
-upper). `partial_credit` gives credit per correct blank.
+upper). `partial_credit: true` splits the points equally between the blanks;
+when left out, only a fully correct answer scores.
 
 Essay (`essay`): `char_limit` caps the answer's length in Examplify.
 
@@ -191,11 +192,13 @@ a. Cell 1
   earlier tab.
 - A subquestion with `a.`, `b.`, ... options is multiple choice. It is scored
   with +/- Partial Credit when it says "select all that apply" or has several
-  correct options; "None of the above" is an ordinary option.
+  correct options, and single answer otherwise; "None of the above" is an
+  ordinary option.
 - A subquestion without options is fill in the blank: each `______` in the stem
   is a blank, answered in order by `(1) ..., (2) ...`, or a single blank is
   added after the stem. Answers are accepted as written, with an ASCII minus,
-  and in lower, capitalised and upper case.
+  and in lower, capitalised and upper case. With several blanks it gets Partial
+  Credit, each blank worth an equal share of the points.
 - Points come from `[n marks]`, and the title is the label and the start of the
   stem. TeX formulas become MathML, and local links keep only their text.
 - Only the bold answer lines of a solution file are read; every subquestion
@@ -205,15 +208,20 @@ a. Cell 1
 
 ```yaml
 folder: 2026 Fall/CS101/Quiz       # required
-defaults: {calculator: none}                # any question field, for every question
+defaults: {calculator: none}                # any question field the question does not set
 parts:                                      # per part file, without .md
   q2-graphs: {calculator: scientific}
 questions:                                  # per label; replaces generated fields
   2C: {blanks: [{answers: ["4", four]}, {range: [-3.01, -2.99]}]}
 ```
 
-A `parts` entry cannot override generated fields such as points. An entry for a
-part or label the paper does not have is an error.
+Fields are applied in this order, later ones winning: `defaults`, `parts`, the
+fields generated from the Markdown, `questions`. So `defaults` and `parts`
+cannot change a field the Markdown sets (`id`, `type`, `title`, `stem_html`,
+`points`, `choices`, `blanks`, `group`, and `scoring`, `partial_credit` and
+`case_study` where they apply); a `questions` entry can, e.g.
+`6B: {partial_credit: false}`. Fields nobody sets keep the spec defaults above.
+An entry for a part or label the paper does not have is an error.
 
 `examples/paper` is a complete two-part paper with its solutions and config.
 
